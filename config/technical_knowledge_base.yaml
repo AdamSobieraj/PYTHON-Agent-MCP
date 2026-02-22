@@ -1,0 +1,14 @@
+chunking:
+  module: "langchain"
+  allowed_extensions:
+    - ".pdf"
+    - ".docx"
+
+data_source:
+  type: "s3"
+
+data_s3_source:
+  input_path: "technical"
+
+vector_db:
+  collection_name: "iso20022_technical"
