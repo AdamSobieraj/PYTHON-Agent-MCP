@@ -48,7 +48,7 @@ class DataLoaderLocalFileLoader:
             title=filename,
             extension=ext,
             url=f"file://{file_path}",
-            domain="local",
+            domain="local", # domenas brana z ścioeżki pliku
             tags=["local", "filesystem"],
             page_number=None  # Cały plik, więc brak konkretnej strony
         )

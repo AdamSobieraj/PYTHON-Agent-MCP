@@ -6,7 +6,6 @@ from typing import Dict, Any, Generator, Tuple
 
 import docx
 import openpyxl
-# Biblioteki zewnętrzne
 import pypdf
 
 from DataLoaderS3Service import DataLoaderS3Service
@@ -18,47 +17,62 @@ logger = logging.getLogger(__name__)
 class DataLoaderS3FileLoader:
     def __init__(self, bucket_name: str, prefix: str):
         self.bucket_name = bucket_name
-        self.prefix = prefix
+
+        # 1. Usuwamy białe znaki
+        clean_prefix = prefix.strip() if prefix else ""
+
+        # 2. Jeśli prefix jest podany, upewniamy się, że kończy się slashem "/"
+        if clean_prefix:
+            if not clean_prefix.endswith('/'):
+                self.prefix = f"{clean_prefix}/"
+            else:
+                self.prefix = clean_prefix
+            logger.info(f"S3FileLoader: Ustawiono filtr na folder: '{self.prefix}'")
+        else:
+            # 3. Jeśli prefix jest pusty -> OSTRZEŻENIE
+            self.prefix = ""
+            logger.warning("!!! UWAGA: Nie podano folderu (prefix). Skrypt pobierze CAŁY BUCKET !!!")
+
         self.s3_service = DataLoaderS3Service()
-        logger.info(f"S3FileLoader initialized. Bucket: {bucket_name}")
 
     def list_objects(self) -> Generator[str, None, None]:
+        # Przekazujemy prefix do serwisu S3. AWS zwróci tylko obiekty zaczynające się od tego ciągu.
         return self.s3_service.list_objects(self.bucket_name, self.prefix)
 
     def load_file_with_metadata(self, s3_key: str) -> Tuple[str, Dict[str, Any]]:
-
-        # 1. Logika wyciągania domeny z hierarchii folderów
+        # Logika wyciągania domeny (podfolderu)
         key_without_prefix = s3_key
-        if self.prefix and s3_key.startswith(self.prefix):
-            # Usuwamy prefix konfiguracyjny, żeby znaleźć "logiczną" domenę (podfolder)
-            key_without_prefix = s3_key[len(self.prefix):].lstrip("/")
 
-        # Jeśli plik jest w podkatalogu, to nazwa tego katalogu to domena
+        # Jeśli zdefiniowano prefix, ucinamy go, aby dostać ścieżkę względną
+        if self.prefix and s3_key.startswith(self.prefix):
+            key_without_prefix = s3_key[len(self.prefix):]
+
+        # Usuwamy ewentualny slash na początku
+        key_without_prefix = key_without_prefix.lstrip("/")
+
+        # Domena to pierwszy katalog wewnątrz wybranego folderu
         domain_name = key_without_prefix.split('/')[0] if '/' in key_without_prefix else "general"
 
         filename = os.path.basename(s3_key)
         ext = os.path.splitext(s3_key)[1].lower()
 
-        # 2. Tworzenie obiektu metadanych (Type Safe)
+        # Tworzenie metadanych
         meta_obj = FileMetadata(
             source=f"s3://{self.bucket_name}/{s3_key}",
             title=filename,
             extension=ext,
             url=f"https://{self.bucket_name}.s3.amazonaws.com/{s3_key}",
             domain=domain_name,
-            # tags domyślne, page_number None
         )
         content = ""
 
         try:
-            # --- BINARNE (PDF, DOCX, XLSX) ---
+            # --- Obsługa plików binarnych (PDF, DOCX, XLSX) ---
             if ext in ['.pdf', '.docx', '.xlsx']:
                 try:
                     file_bytes = self.s3_service.download_bytes(self.bucket_name, s3_key)
-
                     with io.BytesIO(file_bytes) as f:
 
-                        # XLSX
                         if ext == '.xlsx':
                             wb = openpyxl.load_workbook(f, data_only=True)
                             text_parts = []
@@ -70,12 +84,10 @@ class DataLoaderS3FileLoader:
                                         text_parts.append(row_text)
                             content = "\n".join(text_parts)
 
-                        # PDF
                         elif ext == '.pdf':
                             reader = pypdf.PdfReader(f)
                             content = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
 
-                        # DOCX
                         elif ext == '.docx':
                             doc = docx.Document(f)
                             content = "\n".join([para.text for para in doc.paragraphs])
@@ -84,7 +96,7 @@ class DataLoaderS3FileLoader:
                     logger.error(f"Błąd parsowania pliku binarnego {s3_key}: {bin_err}")
                     return "", {}
 
-            # --- TEKSTOWE ---
+            # --- Obsługa plików tekstowych (.md, .txt, .xsd, etc) ---
             else:
                 try:
                     content = self.s3_service.download_text(self.bucket_name, s3_key)

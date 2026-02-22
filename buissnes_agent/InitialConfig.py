@@ -53,7 +53,7 @@ def get_knowledge_base():
 
         data_loader = DataLoaderS3FileLoader(
             bucket_name=os.getenv("S3_BUCKET"),
-            prefix=os.getenv("INPUT_S3_DIRECTORY", "")
+            prefix=settings.get("data_s3_source.input_path")
         )
     else:
         logger.info("Dynamic Import: Ładowanie modułu LocalFile...")

@@ -10,15 +10,15 @@ app:
 # ==============================================================================
 # 1 & 4. ŹRÓDŁA DANYCH (S3 / LOCAL)
 # ==============================================================================
+data_s3_source:
+  input_path: "business"
+
 data_source:
   # DATA_SOURCE=s3
   type: "local"
 
   # INPUT_DIRECTORY (ścieżka do odczytu lokalnego przez loadera)
   local_input_path: "/home/blackmain/PycharmProjects/PYTHON-Agent-MCP/buissnes_agent/inputs"
-
-  # LOCAL_DATA_PATH (ścieżka do uploadu przez skrypt pomocniczy)
-  local_upload_path: "/home/blackmain/PycharmProjects/PYTHON-Agent-MCP/buissnes_agent/inputs"
 
 # ==============================================================================
 # 2 & 3. CHUNKING I STRATEGIE
