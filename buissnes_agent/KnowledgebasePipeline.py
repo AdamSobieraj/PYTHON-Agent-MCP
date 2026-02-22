@@ -5,7 +5,7 @@ from typing import Dict, Any, Generator, Tuple
 from typing import Protocol, List
 
 import numpy as np
-from openai import OpenAI
+from langchain_openai import OpenAIEmbeddings
 
 from buissnes_agent.config_loader import settings
 # Chunkings
@@ -83,7 +83,7 @@ class SearchKnowledgebase:
 
     def __init__(
             self,
-            client: OpenAI,
+            client: OpenAIEmbeddings,
             database_store: VectorStoreInterface,
             data_loader: DataLoaderInterface,
             embedding_model: str,
@@ -111,8 +111,8 @@ class SearchKnowledgebase:
     def _embed(self, text: str) -> List[float]:
         # Wrapper na API OpenAI.
         try:
-            emb = self.client.embeddings.create(input=[text.replace("\n", " ")], model=self.model)
-            return np.array(emb.data[0].embedding, dtype=np.float32)
+            emb = self.client.embed_documents([text.replace("\n", " ")])
+            return np.array(emb[0], dtype=np.float32)
         except Exception as e:
             logger.error(f"Embedding API Error: {e}")
             raise e

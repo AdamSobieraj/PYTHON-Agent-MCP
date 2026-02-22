@@ -3,8 +3,9 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from openai import OpenAI
-
+from langchain_openai import OpenAIEmbeddings
+import httpx
+import json
 from QdrantDatabaseStore import QdrantDatabaseStore
 from buissnes_agent.config_loader import settings
 
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 KNOWLEDGE_BASE = None
+SSL_VERIFY = os.getenv("SSL_VERIFY", 'False').lower() in ('true', '1', 't')
 
 def get_knowledge_base():
     """
@@ -65,9 +67,20 @@ def get_knowledge_base():
         )
 
     # 3. Inicjalizacja Klientów
-    client = OpenAI(
+    sync_client = httpx.Client(
+        verify=SSL_VERIFY,
+    )
+    async_client = httpx.AsyncClient(
+        verify=SSL_VERIFY,
+    )
+    emb_model = os.getenv('EMBEDDING_MODEL')
+    client = OpenAIEmbeddings(
+        model=emb_model,
         api_key=os.getenv("EMBEDDING_API_KEY"),
-        base_url=os.getenv("EMBEDDING_BASE_URL")
+        base_url=os.getenv("EMBEDDING_BASE_URL"),
+        http_client=sync_client,
+        http_async_client=async_client,
+        default_headers=json.loads(os.getenv('DEFAULT_HEADERS')),
     )
 
     store = QdrantDatabaseStore(
