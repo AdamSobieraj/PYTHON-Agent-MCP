@@ -68,7 +68,7 @@ def _init_resources():
         raise e
 
 
-def run_iso_rag(query: str) -> str:
+def run_generic_rag(query: str, collection_name: str) -> str:
     """
     ### GŁÓWNA LOGIKA NARZĘDZIA RAG
 
@@ -76,7 +76,6 @@ def run_iso_rag(query: str) -> str:
     2. Szuka w bazie Qdrant wektorów najbardziej podobnych (Search).
     3. Zwraca surowy tekst dokumentacji wraz z metadanymi.
     """
-    collection_name = settings.get("vector_db.collection_name")
     top_k = 5  # Ilość zwracanych fragmentów
 
     # Upewnij się, że mamy połączenie z bazą
