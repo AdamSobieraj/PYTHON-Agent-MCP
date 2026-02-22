@@ -114,25 +114,38 @@ def run_iso_rag(query: str) -> str:
         for i, point in enumerate(points, 1):
             payload = point.payload or {}
 
-            # Pobieranie pól zgodnie z nowym schematem
-            # Priorytet: 'phrase' -> 'text' -> Placeholder
+            # --- EKSTRAKCJA PÓL Z PAYLOADU ---
+            # Treść główna
             content = payload.get("phrase") or payload.get("text") or "[BRAK TREŚCI]"
 
-            # Metadane źródłowe
-            source_uri = payload.get("source", "nieznane źródło")
-            title = payload.get("title")
+            # Podstawowe informacje
+            title = payload.get("title", "Bez tytułu")
+            source_path = payload.get("source", "Nieznane źródło")
+
+            # Dodatkowe metadane (zgodnie z Twoim JSON-em)
+            url = payload.get("url", "-")
+            domain = payload.get("domain", "ogólna")
+            extension = payload.get("extension", "")
+            meta_id = payload.get("phrase_metadata_id", "brak-id")
+
+            # Obsługa tagów (lista -> string)
+            tags_list = payload.get("tags", [])
+            tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
+
+            # Opcjonalne (jeśli wystąpią w innych plikach)
             page = payload.get("page_number")
+            page_info = f", Strona: {page}" if page else ""
 
-            # Budowanie nagłówka
-            source_info = f"Źródło: {source_uri}"
-            if title and title not in source_uri:
-                source_info += f" ({title})"
-            if page:
-                source_info += f", Strona: {page}"
-
+            # --- BUDOWANIE WPISU ---
             entry = (
                 f"--- DOKUMENT {i} (Relewancja: {point.score:.4f}) ---\n"
-                f"{source_info}\n"
+                f"Tytuł: {title}\n"
+                f"Źródło (plik): {source_path}{page_info}\n"
+                f"URL: {url}\n"
+                f"Domena: {domain}\n"
+                f"Typ: {extension}\n"
+                f"Tagi: {tags_str}\n"
+                f"ID Fragmentu: {meta_id}\n"
                 f"Treść:\n{content.strip()}"
             )
             formatted_output.append(entry)
