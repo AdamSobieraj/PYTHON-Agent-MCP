@@ -1,0 +1,11 @@
+chunking:
+  module: "langchain"
+
+data_source:
+  type: "s3"
+
+data_s3_source:
+  input_path: "business"
+
+vector_db:
+  collection_name: "iso20022_business"
