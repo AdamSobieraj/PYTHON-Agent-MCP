@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import sys
-
+import os
 from fastmcp import FastMCP
 
 from tools.tool_confluence import run_confluence_search
