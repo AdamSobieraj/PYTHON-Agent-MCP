@@ -6,7 +6,7 @@ from fastmcp import FastMCP
 
 from tools.tool_confluence import run_confluence_search
 # IMPORTY LOGIKI NARZĘDZI
-from tools.tool_iso_rag import run_iso_rag
+from tools.tool_iso_rag import run_generic_rag
 from tools.tool_wikipedia import run_wikipedia_search
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
@@ -36,9 +36,10 @@ async def query_iso20022_business_knowledge_base(query: str) -> str:
     - Pytania operacyjne dotyczące TIPS/SCT Inst: czym jest TIPS, zasady transferu płynności, strony/rachunki i konfiguracje opcji rozliczeniowych.
     - ISO 20022 XML „jak to przedstawić/zwalidować?”: formatowanie waluty i kwoty, przesunięcia UTC, wzorce XSD oraz interpretacja obowiązkowa i opcjonalna – przydatne podczas wdrażania/analizy komunikatów.
     """
+    collection_name = os.getenv('ISO20022_BUSINESS_COLLECTION_NAME')
     # WAŻNE: asyncio.to_thread uruchamia funkcję synchroniczną (run_iso_rag) w osobnym wątku.
     # Zapobiega to blokowaniu pętli zdarzeń (Event Loop) serwera, gdy czekamy na bazę danych.
-    return await asyncio.to_thread(run_iso_rag, query)
+    return await asyncio.to_thread(run_generic_rag, query, collection_name)
 
 @mcp.tool()
 async def query_iso20022_technical_knowledge_base(query: str) -> str:
@@ -50,9 +51,10 @@ async def query_iso20022_technical_knowledge_base(query: str) -> str:
     - Dokładna struktura komunikatów ISO 20022: elementy, definicje i sposób formalnego opisu komunikatu w dokumentacji MDR.
     - Pytania międzydziedzinowe, w których musisz polegać na oficjalnych definicjach ISO 20022 (a nie na interpretacjach dostawców/blogów), np. porównanie pojęć dotyczących płatności, papierów wartościowych i sprawozdawczości regulacyjnej.
     """
+    collection_name = os.getenv('ISO20022_TECHNICAL_COLLECTION_NAME')
     # WAŻNE: asyncio.to_thread uruchamia funkcję synchroniczną (run_iso_rag) w osobnym wątku.
     # Zapobiega to blokowaniu pętli zdarzeń (Event Loop) serwera, gdy czekamy na bazę danych.
-    return await asyncio.to_thread(run_iso_rag, query)
+    return await asyncio.to_thread(run_generic_rag, query, collection_name)
 
 @mcp.tool()
 async def query_iso20022_message_schemas_knowledge_base(query: str) -> str:
@@ -63,9 +65,10 @@ async def query_iso20022_message_schemas_knowledge_base(query: str) -> str:
     - Tworzenie parserów/maperów/generatorów: generowanie kodu z XSD, budowanie reguł transformacji, mapowanie pól między wersjami/wariantami lub tworzenie przykładowych szkieletów danych zgodnych z ograniczeniami schematu.
     - Implementacje API/XML: gdy użytkownik potrzebuje reprezentacji XML zgodnej z semantyką ISO 20022 (i masz artefakty schematu XML w kolekcji) lub potrzebuje wskazówek opartych na metodach generowania schematu XML zgodnych z ISO 20022.
     """
+    collection_name = os.getenv('ISO20022_MESSAGE_SCHEMAS_COLLECTION_NAME')
     # WAŻNE: asyncio.to_thread uruchamia funkcję synchroniczną (run_iso_rag) w osobnym wątku.
     # Zapobiega to blokowaniu pętli zdarzeń (Event Loop) serwera, gdy czekamy na bazę danych.
-    return await asyncio.to_thread(run_iso_rag, query)
+    return await asyncio.to_thread(run_generic_rag, query, collection_name)
 
 @mcp.tool()
 async def search_wikipedia_general(query: str) -> str:
