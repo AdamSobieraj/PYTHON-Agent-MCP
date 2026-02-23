@@ -17,7 +17,7 @@ from a2a.utils import (
 )
 from a2a.utils.errors import ServerError
 
-from agent import AnalysisAgent
+from a2a_agent.agent import AnalysisAgent
 
 
 logging.basicConfig(level=logging.INFO)

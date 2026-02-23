@@ -20,8 +20,8 @@ from a2a.types import (
 )
 from dotenv import load_dotenv
 
-from agent import AnalysisAgent
-from agent_executor import AnalysisAgentExecutor
+from a2a_agent.agent import AnalysisAgent
+from a2a_agent.agent_executor import AnalysisAgentExecutor
 
 
 load_dotenv()
