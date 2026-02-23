@@ -1,5 +1,5 @@
 # Use a Python image with uv pre-installed
-FROM ghcr.io/astral-sh/uv:python3.10-alpine AS uv
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS uv
 # Install local CA certificates
 COPY localca.pem /usr/local/share/ca-certificates/localca.crt
 RUN update-ca-certificates
@@ -8,12 +8,14 @@ RUN update-ca-certificates
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV CERTINFO=/etc/ssl/certs/ca-certificates.crt
+ENV UV_PYTHON_PREFERENCE=only-system
 
 # Install the project into `/app`
 WORKDIR /app
 
 # Create a non-root user 'app'
-RUN adduser -D -h /home/app -s /bin/sh app
+RUN useradd -m -s /bin/sh app
+
 
 #chown the app directory
 RUN chown -R app:app /app   
@@ -63,4 +65,4 @@ ENV PYTHONUNBUFFERED=1
 
 
 # Default to running the 'agent' if no other arguments are provided to docker run
-CMD ["uv", "run", "/app/buissnes_agent/a2a_agent/", "--host", "agent"]
+CMD ["uv", "run", "/app/buissnes_agent/a2a_agent/", "--host", "0.0.0.0"]
