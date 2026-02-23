@@ -1,5 +1,5 @@
 # Use a Python image with uv pre-installed
-FROM ghcr.io/astral-sh/uv:python3.10-alpine AS uv
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS uv
 # Install local CA certificates
 COPY localca.pem /usr/local/share/ca-certificates/localca.crt
 RUN update-ca-certificates
@@ -9,17 +9,22 @@ ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV CERTINFO=/etc/ssl/certs/ca-certificates.crt
 
+
 # Install the project into `/app`
 WORKDIR /app
 
 # Create a non-root user 'app'
-RUN adduser -D -h /home/app -s /bin/sh app
+RUN useradd -m -s /bin/sh app
+
 
 #chown the app directory
 RUN chown -R app:app /app   
 
 USER app
 
+#set uv preference to use system python
+ENV UV_PYTHON_PREFERENCE=only-system
+ENV UV_SYSTEM_PYTHON=true
 
 # Enable bytecode compilation
 ENV UV_COMPILE_BYTECODE=1
@@ -54,13 +59,16 @@ RUN find /app/.venv -type d -name '__pycache__' -prune -exec rm -rf {} + || true
 
 
 
-# Place executables in the environment at the front of the path
+# set path to the virtual environment
 ENV PATH="/app/.venv/bin:$PATH"
-
+# set python path to the virtual environment
+ENV PYTHONPATH="/app/buissnes_agent:/app/.venv/lib/python3.14/site-packages"
+# set tiktoken cache directory
+ENV TIKTOKEN_CACHE_DIR=/app/buissnes_agent
 # Disable Python output buffering for proper stdio communication
 ENV PYTHONUNBUFFERED=1
 
 
 
 # Default to running the 'agent' if no other arguments are provided to docker run
-CMD ["uv", "run", "/app/buissnes_agent/a2a_agent/", "--host", "agent"]
+CMD ["uv", "run", "/app/buissnes_agent/a2a_agent/", "--host", "0.0.0.0"]
