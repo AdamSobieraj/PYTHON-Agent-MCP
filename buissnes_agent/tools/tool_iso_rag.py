@@ -5,9 +5,9 @@ import sys
 import qdrant_client
 from dotenv import load_dotenv
 from langchain_openai import OpenAIEmbeddings
-
+import json
 from buissnes_agent.config_loader import settings
-
+import httpx
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 # aby nie tworzyć nowego połączenia przy każdym zapytaniu (optymalizacja).
 _qdrant_client = None
 _embeddings = None
+
+SSL_VERIFY = os.getenv("SSL_VERIFY", 'False').lower() in ('true', '1', 't')
 
 load_dotenv()
 
@@ -55,11 +57,20 @@ def _init_resources():
 
         # 2. Inicjalizacja modelu Embeddingów (OpenAI lub Local/Nomic)
         # check_embedding_ctx_length=False pozwala na dłuższe teksty (ważne przy RAG)
+        sync_client = httpx.Client(
+            verify=SSL_VERIFY,
+        )
+        async_client = httpx.AsyncClient(
+            verify=SSL_VERIFY,
+        )
         _embeddings = OpenAIEmbeddings(
             model=emb_model,
             base_url=emb_url,
             api_key=emb_key,
-            check_embedding_ctx_length=False
+            check_embedding_ctx_length=False,
+            http_client=sync_client,
+            http_async_client=async_client,
+            default_headers=json.loads(os.getenv('DEFAULT_HEADERS')),
         )
         print(f"[ISO Tool] Połączono z Qdrant i skonfigurowano Embeddingi ({emb_model}).", file=sys.stderr)
 

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 memory = MemorySaver()
 
 AGENT_SETTINGS = os.getenv("AGENT_SETTINGS", "Analyst agent")
-SSL_VERIFY = bool(os.getenv('SSL_VERIFY', False))
+SSL_VERIFY = os.getenv("SSL_VERIFY", 'False').lower() in ('true', '1', 't')
 INTERNAL_MCP_URL = os.getenv("INTERNAL_MCP_URL", "http://localhost:8011/mcp")
 ATLASSIAN_MCP_URL = os.getenv("ATLASSIAN_MCP_URL", "http://localhost:9002/mcp/")
 
@@ -166,7 +166,14 @@ class AnalysisAgent:
         else:
             with open(os.path.join(os.path.dirname(__file__), 'default_config.json')) as f:
                 agent_config = json.load(f)
+        
 
+        sync_client = httpx.Client(
+            verify=SSL_VERIFY,
+        )
+        async_client = httpx.AsyncClient(
+            verify=SSL_VERIFY,
+        )
         self.model = ChatOpenAI(
             model=os.getenv('CHAT_MODEL'),
             openai_api_key=os.getenv('CHAT_API_KEY', 'EMPTY'),
@@ -174,6 +181,8 @@ class AnalysisAgent:
             temperature=float(agent_config['config']['temperature']),
             tiktoken_model_name=None,
             default_headers=json.loads(os.getenv('DEFAULT_HEADERS')),
+            http_client=sync_client,
+            http_async_client=async_client,
         )
         self.graph = create_react_agent(
             self.model,
