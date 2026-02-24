@@ -68,8 +68,6 @@ class DataLoaderInterface(Protocol):
 # ==============================================================================
 # KLASA ORKIESTRATORA
 # ==============================================================================
-
-
 class SearchKnowledgebase:
     """
     ### Klasa Orkiestrator (Coordinator Class)

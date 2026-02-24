@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import os
 import sys
@@ -67,45 +68,106 @@ class DataLoaderS3FileLoader:
         content = ""
 
         try:
-            # --- Obsługa plików binarnych (PDF, DOCX, XLSX) ---
-            if ext in ['.pdf', '.docx', '.xlsx']:
-                try:
-                    file_bytes = self.s3_service.download_bytes(self.bucket_name, s3_key)
-                    with io.BytesIO(file_bytes) as f:
+            # --- ROUTING PO TYPIE PLIKU ---
+            if ext == '.xlsx':
+                content = self._process_xlsx(s3_key)
 
-                        if ext == '.xlsx':
-                            wb = openpyxl.load_workbook(f, data_only=True)
-                            text_parts = []
-                            for sheet in wb.worksheets:
-                                text_parts.append(f"--- Sheet: {sheet.title} ---")
-                                for row in sheet.iter_rows(values_only=True):
-                                    row_text = " ".join([str(cell) for cell in row if cell is not None])
-                                    if row_text.strip():
-                                        text_parts.append(row_text)
-                            content = "\n".join(text_parts)
+            elif ext == '.pdf':
+                content = self._process_pdf(s3_key)
 
-                        elif ext == '.pdf':
-                            reader = pypdf.PdfReader(f)
-                            content = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+            elif ext == '.docx':
+                content = self._process_docx(s3_key)
 
-                        elif ext == '.docx':
-                            doc = docx.Document(f)
-                            content = "\n".join([para.text for para in doc.paragraphs])
-
-                except Exception as bin_err:
-                    logger.error(f"Błąd parsowania pliku binarnego {s3_key}: {bin_err}")
-                    return "", {}
-
-            # --- Obsługa plików tekstowych (.md, .txt, .xsd, etc) ---
             else:
-                try:
-                    content = self.s3_service.download_text(self.bucket_name, s3_key)
-                except Exception as txt_err:
-                    logger.error(f"Błąd pobierania tekstu {s3_key}: {txt_err}")
-                    return "", {}
+                # Domyślna obsługa plików tekstowych (txt, md, xml, xsd, json)
+                content = self._process_text(s3_key)
 
             return content, meta_obj.to_dict()
 
         except Exception as e:
             logger.error(f"Krytyczny błąd przy pliku {s3_key}: {e}")
             return "", {}
+
+    def _process_xlsx(self, s3_key: str) -> str:
+        """
+        Pobiera plik XLSX z S3 i konwertuje go na JSON String.
+        """
+        try:
+            # Pobieramy bajty z S3
+            file_bytes = self.s3_service.download_bytes(self.bucket_name, s3_key)
+
+            # Otwieramy bajty jako plik w pamięci
+            with io.BytesIO(file_bytes) as f:
+                wb = openpyxl.load_workbook(f, data_only=True)
+                excel_data = {}
+
+                for sheet in wb.worksheets:
+                    sheet_data = []
+                    for row in sheet.iter_rows(values_only=True):
+                        # Sprawdzenie czy wiersz nie jest pusty
+                        if any(cell is not None for cell in row):
+                            # Konwersja na string dla bezpieczeństwa (np. daty)
+                            clean_row = [str(cell) if cell is not None else None for cell in row]
+                            sheet_data.append(clean_row)
+
+                    if sheet_data:
+                        excel_data[sheet.title] = sheet_data
+
+                if not excel_data:
+                    return ""
+
+                # Serializacja do JSON
+                return json.dumps(excel_data, ensure_ascii=False)
+
+        except Exception as e:
+            logger.error(f"Błąd przetwarzania XLSX {s3_key}: {e}")
+            return ""
+
+    def _process_pdf(self, s3_key: str) -> str:
+        """
+        Pobiera PDF z S3 i ekstrahuje tekst.
+        """
+        try:
+            file_bytes = self.s3_service.download_bytes(self.bucket_name, s3_key)
+
+            with io.BytesIO(file_bytes) as f:
+                reader = pypdf.PdfReader(f)
+                text_pages = []
+
+                for page in reader.pages:
+                    extracted = page.extract_text()
+                    if extracted:
+                        text_pages.append(extracted)
+
+                return "\n".join(text_pages)
+
+        except Exception as e:
+            logger.error(f"Błąd przetwarzania PDF {s3_key}: {e}")
+            return ""
+
+    def _process_docx(self, s3_key: str) -> str:
+        """
+        Pobiera DOCX z S3 i ekstrahuje tekst.
+        """
+        try:
+            file_bytes = self.s3_service.download_bytes(self.bucket_name, s3_key)
+
+            with io.BytesIO(file_bytes) as f:
+                doc = docx.Document(f)
+                full_text = [para.text for para in doc.paragraphs if para.text.strip()]
+                return "\n".join(full_text)
+
+        except Exception as e:
+            logger.error(f"Błąd przetwarzania DOCX {s3_key}: {e}")
+            return ""
+
+    def _process_text(self, s3_key: str) -> str:
+        """
+        Pobiera pliki tekstowe (TXT, MD, XML, JSON, etc.) z S3.
+        """
+        try:
+            # Dla plików tekstowych używamy download_text, który obsługuje dekodowanie utf-8
+            return self.s3_service.download_text(self.bucket_name, s3_key)
+        except Exception as e:
+            logger.error(f"Błąd pobierania tekstu {s3_key}: {e}")
+            return ""

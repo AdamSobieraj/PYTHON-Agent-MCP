@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 KNOWLEDGE_BASE = None
-SSL_VERIFY = os.getenv("SSL_VERIFY", 'False').lower() in ('true', '1', 't')
 
 def get_knowledge_base():
     """
@@ -44,8 +43,6 @@ def get_knowledge_base():
     # =========================================================
     # Importujemy klasę dopiero tutaj, wewnątrz IF-a.
     # Dzięki temu nie musimy mieć boto3, jeśli używamy 'local'.
-
-    data_loader = None
 
     if data_source == "s3":
         logger.info("Dynamic Import: Ładowanie modułu S3...")
@@ -90,5 +87,4 @@ def get_knowledge_base():
 try:
     get_knowledge_base()
 except Exception as e:
-    # Logujemy błąd krytyczny, ale pozwalamy aplikacji działać (np. w trybie offline)
     logger.error(f"CRITICAL INIT ERROR: Nie udało się zainicjować bazy wiedzy: {e}")

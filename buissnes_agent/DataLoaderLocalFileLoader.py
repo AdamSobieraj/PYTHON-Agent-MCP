@@ -1,12 +1,12 @@
+import json
 import logging
 import os
 import sys
 from typing import Generator, Tuple, Dict, Any
 
-import docx  # pip install python-docx
-import openpyxl  # pip install openpyxl
-# Biblioteki zewnętrzne
-import pypdf  # pip install pypdf
+import docx
+import openpyxl
+import pypdf
 
 from buissnes_agent.MetadataModels import FileMetadata
 from buissnes_agent.config_loader import settings
@@ -58,51 +58,103 @@ class DataLoaderLocalFileLoader:
         try:
             # --- XLSX (Excel) ---
             if ext == ".xlsx":
-                try:
-                    # data_only=True pobiera wartości, a nie formuły (np. =SUMA(...))
-                    wb = openpyxl.load_workbook(file_path, data_only=True)
-                    text_parts = []
-                    for sheet in wb.worksheets:
-                        text_parts.append(f"--- Sheet: {sheet.title} ---")
-                        for row in sheet.iter_rows(values_only=True):
-                            # Łączymy komórki w wierszu spacją, pomijając puste (None)
-                            row_text = " ".join([str(cell) for cell in row if cell is not None])
-                            if row_text.strip():
-                                text_parts.append(row_text)
-                    content = "\n".join(text_parts)
-                except Exception as e:
-                    logger.error(f"Błąd parsowania XLSX {filename}: {e}")
-                    return "", {}
-
+                content = self._process_xlsx(file_path)
             # --- PDF ---
             elif ext == ".pdf":
-                try:
-                    reader = pypdf.PdfReader(file_path)
-                    content = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-                except Exception as e:
-                    logger.error(f"Błąd parsowania PDF {filename}: {e}")
-                    return "", {}
-
+                content = self._process_pdf(file_path)
             # --- DOCX ---
             elif ext == ".docx":
-                try:
-                    doc = docx.Document(file_path)
-                    content = "\n".join([para.text for para in doc.paragraphs])
-                except Exception as e:
-                    logger.error(f"Błąd parsowania DOCX {filename}: {e}")
-                    return "", {}
-
+                content = self._process_docx(file_path)
             # --- TEKSTOWE ---
             else:
-                try:
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
-                except Exception as e:
-                    logger.error(f"Błąd odczytu tekstu {filename}: {e}")
-                    return "", {}
+                content = self._process_text(file_path)
 
             return content, meta_obj.to_dict()
 
         except Exception as e:
             logger.error(f"Krytyczny błąd przy pliku {file_path}: {e}")
             return "", {}
+
+    def _process_xlsx(self, file_path: str) -> str:
+        """
+        Prywatna metoda do konwersji pliku XLSX na JSON String.
+        Zachowuje strukturę arkuszy i wierszy.
+        """
+        try:
+            # data_only=True pobiera wyliczone wartości, a nie formuły
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+            excel_data = {}
+
+            for sheet in wb.worksheets:
+                sheet_data = []
+
+                # Iteracja po wierszach (values_only=True zwraca krotki wartości)
+                for row in sheet.iter_rows(values_only=True):
+                    # Sprawdzenie, czy wiersz nie jest pusty (zawiera przynajmniej jedną wartość niebędącą None)
+                    if any(cell is not None for cell in row):
+                        # Konwersja każdej komórki na string (ważne dla dat i liczb)
+                        # None zamieniamy na null (w JSON) lub pomijamy
+                        clean_row = [str(cell) if cell is not None else None for cell in row]
+                        sheet_data.append(clean_row)
+
+                # Dodajemy arkusz do słownika tylko jeśli ma dane
+                if sheet_data:
+                    excel_data[sheet.title] = sheet_data
+
+            if not excel_data:
+                logger.warning(f"Plik XLSX {os.path.basename(file_path)} jest pusty lub nie zawiera danych.")
+                return ""
+
+            # Serializacja do JSON String
+            # ensure_ascii=False pozwala zachować polskie znaki
+            # indent=2 poprawia czytelność (opcjonalne, zwiększa rozmiar stringa)
+            return json.dumps(excel_data, ensure_ascii=False)
+
+        except Exception as e:
+            logger.error(f"Błąd przetwarzania XLSX {os.path.basename(file_path)}: {e}")
+            return ""
+
+    def _process_pdf(self, file_path: str) -> str:
+        """
+        Prywatna metoda do ekstrakcji tekstu z pliku PDF.
+        """
+        try:
+            reader = pypdf.PdfReader(file_path)
+            text_pages = []
+
+            for i, page in enumerate(reader.pages):
+                extracted = page.extract_text()
+                if extracted:
+                    # Opcjonalnie: Można dodać numer strony do tekstu, co pomaga w RAG
+                    # text_pages.append(f"--- Page {i+1} ---")
+                    text_pages.append(extracted)
+
+            return "\n".join(text_pages)
+
+        except Exception as e:
+            logger.error(f"Błąd przetwarzania PDF {os.path.basename(file_path)}: {e}")
+            return ""
+
+    def _process_docx(self, file_path: str) -> str:
+        """
+        Ekstrakcja tekstu z pliku DOCX.
+        """
+        try:
+            doc = docx.Document(file_path)
+            # Pobieramy tekst z paragrafów
+            full_text = [para.text for para in doc.paragraphs if para.text.strip()]
+            return "\n".join(full_text)
+        except Exception as e:
+            logger.error(f"Błąd parsowania DOCX {os.path.basename(file_path)}: {e}")
+            return ""
+
+    def _process_text(self, file_path: str) -> str:
+        """
+        Odczyt plików tekstowych (TXT, MD, XML, JSON, XSD itp.).
+        """
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"Błąd odczytu tekstu {os.path.basename(file_path)}: {e}")
+            return ""
