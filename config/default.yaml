@@ -119,7 +119,7 @@ chunking:
         size: 1500
         overlap: 200
       xlsx:
-        strategy: "auto"
+        strategy: "recursive"
         size: 2000
         overlap: 0
       # Default fallback

@@ -3,10 +3,9 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from langchain_openai import OpenAIEmbeddings
-import httpx
-import json
+
 from QdrantDatabaseStore import QdrantDatabaseStore
+from buissnes_agent.EmbeddingClient import LocalEmbeddingClient
 from buissnes_agent.config_loader import settings
 
 # Konfiguracja podstawowego logowania
@@ -67,21 +66,7 @@ def get_knowledge_base():
         )
 
     # 3. Inicjalizacja Klientów
-    sync_client = httpx.Client(
-        verify=SSL_VERIFY,
-    )
-    async_client = httpx.AsyncClient(
-        verify=SSL_VERIFY,
-    )
-    emb_model = os.getenv('EMBEDDING_MODEL')
-    client = OpenAIEmbeddings(
-        model=emb_model,
-        api_key=os.getenv("EMBEDDING_API_KEY"),
-        base_url=os.getenv("EMBEDDING_BASE_URL"),
-        http_client=sync_client,
-        http_async_client=async_client,
-        default_headers=json.loads(os.getenv('DEFAULT_HEADERS')),
-    )
+    embedding_client = LocalEmbeddingClient()
 
     store = QdrantDatabaseStore(
         url=os.getenv("QDRANT_API"),
@@ -92,7 +77,7 @@ def get_knowledge_base():
 
     # 4. Instancjalizacja Głównego Orkiestratora
     KNOWLEDGE_BASE = SearchKnowledgebase(
-        client=client,
+        client=embedding_client,
         database_store=store,
         data_loader=data_loader,
         embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),

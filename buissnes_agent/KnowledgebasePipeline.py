@@ -4,8 +4,7 @@ import sys
 from typing import Dict, Any, Generator, Tuple
 from typing import Protocol, List
 
-import numpy as np
-from langchain_openai import OpenAIEmbeddings
+from langchain_core.embeddings import Embeddings
 
 from buissnes_agent.config_loader import settings
 # Chunkings
@@ -83,7 +82,7 @@ class SearchKnowledgebase:
 
     def __init__(
             self,
-            client: OpenAIEmbeddings,
+            client: Embeddings,
             database_store: VectorStoreInterface,
             data_loader: DataLoaderInterface,
             embedding_model: str,
@@ -107,15 +106,6 @@ class SearchKnowledgebase:
         else:
             logger.info("START: Uruchamianie jednolitego procesu ETL...")
             self.perform_ingestion()
-
-    def _embed(self, text: str) -> List[float]:
-        # Wrapper na API OpenAI.
-        try:
-            emb = self.client.embed_documents([text.replace("\n", " ")])
-            return np.array(emb[0], dtype=np.float32)
-        except Exception as e:
-            logger.error(f"Embedding API Error: {e}")
-            raise e
 
     def perform_ingestion(self):
         """
@@ -203,11 +193,11 @@ class SearchKnowledgebase:
             metadata = item["metadata"]
 
             # Generowanie wektora
-            vec = self._embed(text_content)
+            vec = self.client.embed_query(text_content)
 
             batch_items.append({
                 "text": text_content,
-                "vector": vec.tolist(),
+                "vector": vec,
                 "metadata": metadata
             })
 

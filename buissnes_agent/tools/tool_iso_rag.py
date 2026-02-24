@@ -1,13 +1,12 @@
 import logging
 import os
 import sys
+from typing import Optional
 
 import qdrant_client
 from dotenv import load_dotenv
-from langchain_openai import OpenAIEmbeddings
-import json
-from buissnes_agent.config_loader import settings
-import httpx
+from buissnes_agent.EmbeddingClient import LocalEmbeddingClient
+
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
@@ -15,10 +14,8 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 # Przechowujemy instancje klienta Qdrant i modelu Embeddingów globalnie,
 # aby nie tworzyć nowego połączenia przy każdym zapytaniu (optymalizacja).
-_qdrant_client = None
-_embeddings = None
-
-SSL_VERIFY = os.getenv("SSL_VERIFY", 'False').lower() in ('true', '1', 't')
+_qdrant_client: Optional[qdrant_client.QdrantClient] = None
+_embeddings: Optional[LocalEmbeddingClient] = None
 
 load_dotenv()
 
@@ -39,43 +36,34 @@ def _init_resources():
         return
 
     try:
-        # Pobranie konfiguracji z .env
-        emb_model = os.getenv('EMBEDDING_MODEL')
-        emb_url = os.getenv('EMBEDDING_BASE_URL')
-        emb_key = os.getenv('EMBEDDING_API_KEY')
+        # Pobranie konfiguracji Qdrant z .env
         qdrant_url = os.getenv('QDRANT_API')
         qdrant_key = os.getenv('QDRANT_API_KEY')
 
-        if not emb_model:
-            raise ValueError("Brak zmiennej EMBEDDING_MODEL w pliku .env")
+        # Weryfikacja tylko dla Qdranta, bo LocalEmbeddingClient sam sprawdza swoje zmienne
+        if not qdrant_url:
+            raise ValueError("Brak zmiennej QDRANT_API w pliku .env")
 
         # 1. Inicjalizacja klienta bazy wektorowej Qdrant
+        logger.info(f"Łączenie z Qdrant: {qdrant_url}")
         _qdrant_client = qdrant_client.QdrantClient(
             url=qdrant_url,
             api_key=qdrant_key,
+            # timeout=60 # Opcjonalnie można zwiększyć timeout
         )
 
-        # 2. Inicjalizacja modelu Embeddingów (OpenAI lub Local/Nomic)
-        # check_embedding_ctx_length=False pozwala na dłuższe teksty (ważne przy RAG)
-        sync_client = httpx.Client(
-            verify=SSL_VERIFY,
-        )
-        async_client = httpx.AsyncClient(
-            verify=SSL_VERIFY,
-        )
-        _embeddings = OpenAIEmbeddings(
-            model=emb_model,
-            base_url=emb_url,
-            api_key=emb_key,
-            check_embedding_ctx_length=False,
-            http_client=sync_client,
-            http_async_client=async_client,
-            default_headers=json.loads(os.getenv('DEFAULT_HEADERS')),
-        )
-        print(f"[ISO Tool] Połączono z Qdrant i skonfigurowano Embeddingi ({emb_model}).", file=sys.stderr)
+        # 2. Inicjalizacja modelu Embeddingów (Local Embedding Client)
+        # Klasa sama zaciąga: EMBEDDING_BASE_URL, EMBEDDING_API_KEY, EMBEDDING_MODEL z .env
+        # oraz automatycznie naprawia błędy 400 Bad Request.
+        logger.info("Inicjalizacja LocalEmbeddingClient...")
+        _embeddings = LocalEmbeddingClient()
+
+        print(f"[ISO Tool] Połączono z Qdrant i skonfigurowano Embeddingi ({_embeddings.model}).", file=sys.stderr)
 
     except Exception as e:
-        print(f"[ISO Tool] Błąd krytyczny inicjalizacji: {e}", file=sys.stderr)
+        err_msg = f"[ISO Tool] Błąd krytyczny inicjalizacji zasobów: {e}"
+        print(err_msg, file=sys.stderr)
+        logger.error(err_msg)
         raise e
 
 
@@ -95,6 +83,9 @@ def run_generic_rag(query: str, collection_name: str) -> str:
     except Exception as e:
         return f"Błąd techniczny: Nie udało się połączyć z bazą wiedzy ({str(e)})."
 
+    client = _qdrant_client
+    embedder = _embeddings
+
     if not _qdrant_client or not _embeddings:
         return "Błąd techniczny: Narzędzie RAG nie jest poprawnie skonfigurowane."
 
@@ -102,18 +93,18 @@ def run_generic_rag(query: str, collection_name: str) -> str:
 
     try:
         # KROK 1: Generowanie wektora zapytania
-        query_vector = _embeddings.embed_query(query)
+        # Używamy LocalEmbeddingClient -> embed_query (naprawia format JSON)
+        query_vector = embedder.embed_query(query)
 
         # KROK 2: Wyszukiwanie w Qdrant (Metoda query_points)
-        # ZMIANA: Używamy query_points zamiast search
-        search_response = _qdrant_client.query_points(
+        search_response = client.query_points(
             collection_name=collection_name,
-            query=query_vector,  # ZMIANA: parametr nazywa się 'query', a nie 'query_vector'
+            query=query_vector,
             limit=top_k,
             with_payload=True
         )
 
-        # ZMIANA: query_points zwraca obiekt QueryResponse, a punkty są w atrybucie .points
+        # Pobranie punktów z odpowiedzi
         points = search_response.points
 
         if not points:
@@ -132,7 +123,7 @@ def run_generic_rag(query: str, collection_name: str) -> str:
             title = payload.get("title", "Bez tytułu")
             source_path = payload.get("source", "Nieznane źródło")
 
-            # Dodatkowe metadane (zgodnie z Twoim JSON-em)
+            # Dodatkowe metadane
             url = payload.get("url", "-")
             domain = payload.get("domain", "ogólna")
             extension = payload.get("extension", "")
@@ -142,7 +133,7 @@ def run_generic_rag(query: str, collection_name: str) -> str:
             tags_list = payload.get("tags", [])
             tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
 
-            # Opcjonalne (jeśli wystąpią w innych plikach)
+            # Opcjonalne
             page = payload.get("page_number")
             page_info = f", Strona: {page}" if page else ""
 
