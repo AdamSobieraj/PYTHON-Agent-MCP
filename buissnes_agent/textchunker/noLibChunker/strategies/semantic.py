@@ -27,7 +27,6 @@ class SemanticStrategy(BaseNoLibStrategy):
             # Import warunkowy - tylko jeśli strategia jest używana
             from langchain_experimental.text_splitter import SemanticChunker
 
-            # Używamy naszego naprawionego klienta zamiast OpenAIEmbeddings
             # Musi on być dostępny w ścieżce projektu
             from buissnes_agent.embeddings.local_client import LocalEmbeddingClient
 
