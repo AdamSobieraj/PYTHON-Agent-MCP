@@ -42,13 +42,15 @@ class DataLoaderLocalFileLoader:
         filename = os.path.basename(file_path)
         ext = os.path.splitext(file_path)[1].lower()
 
+        domain_value = self._extract_domain_first(file_path)
+
         # 1. Tworzenie obiektu metadanych (Type Safe)
         meta_obj = FileMetadata(
             source=f"file://{file_path}",
             title=filename,
             extension=ext,
             url=f"file://{file_path}",
-            domain="local", # domenas brana z ścioeżki pliku
+            domain=domain_value,
             tags=["local", "filesystem"],
             page_number=None  # Cały plik, więc brak konkretnej strony
         )
@@ -158,3 +160,25 @@ class DataLoaderLocalFileLoader:
         except Exception as e:
             logger.error(f"Błąd odczytu tekstu {os.path.basename(file_path)}: {e}")
             return ""
+
+    def _extract_domain_first(self, file_path: str) -> str:
+        """
+        Pobiera nazwę domeny na podstawie ścieżki pliku.
+        Domena to pierwszy katalog względem głównego folderu przeszukiwania (self.directory).
+        Np. dla pliku "C:/dane/HR/umowy/2023/umowa.pdf" (gdy self.directory="C:/dane")
+        zwróci "HR".
+        """
+        # Wyliczamy ścieżkę względną pliku w stosunku do przeszukiwanego katalogu
+        rel_path = os.path.relpath(file_path, self.directory)
+
+        # Ujednolicamy ukośniki, aby split zachowywał się tak samo na Windowsie i Linuksie
+        normalized_rel_path = rel_path.replace('\\', '/')
+        parts = normalized_rel_path.split('/')
+
+        if len(parts) > 1:
+            # Plik leży w jakimś podfolderze. Bierzemy folder NAJWYŻSZEGO poziomu.
+            return parts[0]
+        else:
+            # Plik leży bezpośrednio w głównym katalogu przeszukiwania.
+            # Fallback na nazwę tego głównego katalogu lub "local"
+            return os.path.basename(self.directory) or "local"

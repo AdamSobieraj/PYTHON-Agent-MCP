@@ -150,7 +150,8 @@ if __name__ == "__main__":
         # xsd na serwerze i w metadanych link do nich
         # chunking pliku dodawanego w chacie z tymczasowym bazą
 
-        # nazwe kolekcji przez cli podawać
+        # nazwe kolekcji przez cli podawać x
         # pdf czy do markdown czy nie
         # metadane page
 
+        # teraz startowanie ingestion python main.py --profile prod --collection-name my_custom_collection_v2

@@ -41,21 +41,10 @@ class DataLoaderS3FileLoader:
         return self.s3_service.list_objects(self.bucket_name, self.prefix)
 
     def load_file_with_metadata(self, s3_key: str) -> Tuple[str, Dict[str, Any]]:
-        # Logika wyciągania domeny (podfolderu)
-        key_without_prefix = s3_key
-
-        # Jeśli zdefiniowano prefix, ucinamy go, aby dostać ścieżkę względną
-        if self.prefix and s3_key.startswith(self.prefix):
-            key_without_prefix = s3_key[len(self.prefix):]
-
-        # Usuwamy ewentualny slash na początku
-        key_without_prefix = key_without_prefix.lstrip("/")
-
-        # Domena to pierwszy katalog wewnątrz wybranego folderu
-        domain_name = key_without_prefix.split('/')[0] if '/' in key_without_prefix else "general"
-
         filename = os.path.basename(s3_key)
         ext = os.path.splitext(s3_key)[1].lower()
+
+        domain_value = self._extract_domain_first(s3_key)
 
         # Tworzenie metadanych
         meta_obj = FileMetadata(
@@ -63,8 +52,11 @@ class DataLoaderS3FileLoader:
             title=filename,
             extension=ext,
             url=f"https://{self.bucket_name}.s3.amazonaws.com/{s3_key}",
-            domain=domain_name,
-            tags=["s3 storage", "filesystem"],
+            domain=domain_value,  # <--- Podstawienie dynamicznej domeny
+
+            # Dodajemy domenę do tagów (z małych liter) dla lepszego filtrowania w bazie wektorowej
+            tags=["s3_storage", "cloud", domain_value.lower()],
+
             page_number=None  # Cały plik, więc brak konkretnej strony
         )
         content = ""
@@ -173,3 +165,19 @@ class DataLoaderS3FileLoader:
         except Exception as e:
             logger.error(f"Błąd pobierania tekstu {s3_key}: {e}")
             return ""
+
+    def _extract_domain_first(self, s3_key: str) -> str:
+        """
+        Zawsze pobiera GŁÓWNY (najwyższy) folder wprost z klucza S3.
+        Np. dla klucza "technical/ISO20022/MDR/plik.pdf" zwróci "technical".
+        """
+        # Zabezpieczenie: usuwamy ewentualne ukośniki na samym początku klucza
+        clean_key = s3_key.lstrip("/")
+        parts = clean_key.split('/')
+
+        if len(parts) > 1:
+            # Bierzemy ZAWSZE pierwszy, najwyższy folder w hierarchii bucketa
+            return parts[0]
+        else:
+            # Plik leży bezpośrednio w roocie bucketa, bez żadnego folderu
+            return "general"
