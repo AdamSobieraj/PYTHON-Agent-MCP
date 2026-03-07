@@ -64,6 +64,8 @@ class DataLoaderS3FileLoader:
             extension=ext,
             url=f"https://{self.bucket_name}.s3.amazonaws.com/{s3_key}",
             domain=domain_name,
+            tags=["s3 storage", "filesystem"],
+            page_number=None  # Cały plik, więc brak konkretnej strony
         )
         content = ""
 

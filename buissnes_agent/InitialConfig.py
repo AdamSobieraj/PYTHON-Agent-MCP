@@ -29,12 +29,12 @@ def get_knowledge_base():
     from KnowledgebasePipeline import SearchKnowledgebase
 
     # 1. Konfiguracja Chunkera
-    data_source = settings.get("data_source.type", "local")
+    data_source = settings.get("data_source.type")
 
     # 2. Konfiguracja Wymiaru Embeddings
     # OpenAI text-embedding-3-small/large = 1536, Nomic/Titan = 768
     try:
-        emb_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
+        emb_dim = int(os.getenv("EMBEDDING_DIM"))
     except ValueError:
         emb_dim = 1536
 
@@ -77,7 +77,7 @@ def get_knowledge_base():
         client=embedding_client,
         database_store=store,
         data_loader=data_loader,
-        embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+        embedding_model=os.getenv("EMBEDDING_MODEL"),
         force_refresh=False  # Ustaw True w .env lub tutaj, aby wymusić przeładowanie bazy
     )
     return KNOWLEDGE_BASE

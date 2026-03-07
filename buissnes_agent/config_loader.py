@@ -71,7 +71,29 @@ class Config:
         # 5. Nadpisanie ze zmiennych środowiskowych (opcjonalne, dla Docker/K8s)
         self._apply_env_overrides()
 
+        # 4. Nadpisanie z argumentów CLI (NAJWYŻSZY PRIORYTET)
+        self._apply_cli_overrides()
+
         logger.info("Konfiguracja załadowana pomyślnie.")
+
+    def _apply_cli_overrides(self):
+        """Pobiera parametry z CLI, które nadpisują konfigurację w YAML/ENV."""
+        parser = argparse.ArgumentParser(add_help=False)
+        # Rejestrujemy argument CLI, który nas interesuje
+        parser.add_argument("--collection-name", type=str, help="Nadpisuje nazwę kolekcji Qdrant (z YAML)")
+
+        # Używamy parse_known_args, żeby zignorować inne flagi podane przez użytkownika
+        args, _ = parser.parse_known_args()
+
+        if args.collection_name:
+            logger.info(
+                f"Wykryto argument CLI dla kolekcji. Nadpisywanie: vector_db.collection_name = '{args.collection_name}'")
+            # Upewniamy się, że gałąź w słowniku istnieje
+            if "vector_db" not in self._data:
+                self._data["vector_db"] = {}
+
+            # Nadpisujemy wartość w słowniku konfiguracyjnym
+            self._data["vector_db"]["collection_name"] = args.collection_name
 
     def _load_yaml(self, path: str) -> Dict:
         if not os.path.exists(path):
