@@ -70,16 +70,16 @@ async def query_iso20022_message_schemas_knowledge_base(query: str) -> str:
     # Zapobiega to blokowaniu pętli zdarzeń (Event Loop) serwera, gdy czekamy na bazę danych.
     return await asyncio.to_thread(run_generic_rag, query, collection_name)
 
-@mcp.tool()
-async def search_wikipedia_general(query: str) -> str:
-    """
-    Przeszukuje Wikipedię w celu znalezienia definicji ogólnych, historii, kodów krajów itp.
-    Użyj tego narzędzia do pytań nietechnicznych:
-    - Definicje biznesowe (np. "Co to jest IBAN?").
-    - Informacje o organizacjach (SWIFT, FED, EBA).
-    - Dane geograficzne i historyczne.
-    """
-    return await asyncio.to_thread(run_wikipedia_search, query)
+# @mcp.tool()
+# async def search_wikipedia_general(query: str) -> str:
+#     """
+#     Przeszukuje Wikipedię w celu znalezienia definicji ogólnych, historii, kodów krajów itp.
+#     Użyj tego narzędzia do pytań nietechnicznych:
+#     - Definicje biznesowe (np. "Co to jest IBAN?").
+#     - Informacje o organizacjach (SWIFT, FED, EBA).
+#     - Dane geograficzne i historyczne.
+#     """
+#     return await asyncio.to_thread(run_wikipedia_search, query)
 
 
 # @mcp.tool()
