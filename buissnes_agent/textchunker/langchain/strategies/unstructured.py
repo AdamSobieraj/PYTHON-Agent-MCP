@@ -25,34 +25,33 @@ class UnstructuredStrategy(ChunkingStrategy):
     def __init__(self, mode: str = "single"):
         self.mode = mode
 
-    def split_text(self, text: str) -> List[Document]:
-        # --- FIX: Lazy Import ---
-        # Importujemy bibliotekę dopiero tutaj. Jeśli jej nie ma, błąd wyskoczy
-        # tylko przy próbie użycia tej konkretnej strategii, a nie przy starcie całej aplikacji.
+    def split_documents(self, documents: List[Document]) -> List[Document]:
         try:
             from langchain_community.document_loaders import UnstructuredMarkdownLoader
         except ImportError:
-            raise ImportError(
-                "Nie znaleziono biblioteki 'unstructured'. "
-                "Zainstaluj ją komendą: pip install unstructured markdown"
-            )
+            raise ImportError("Brak unstructured. Uruchom: pip install unstructured markdown")
 
+        final_chunks = []
         suffix = ".md"
-        # Tworzenie pliku tymczasowego
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-            # Kodowanie UTF-8 jest kluczowe dla polskich znaków
-            temp_file.write(text.encode("utf-8"))
-            temp_file_path = temp_file.name
 
-        try:
-            # Ładowanie pliku przy użyciu biblioteki unstructured
-            loader = UnstructuredMarkdownLoader(temp_file_path, mode=self.mode)
-            return loader.load()
-        except Exception as e:
-            # Logowanie błędu, jeśli parsowanie się nie uda
-            print(f"Błąd podczas przetwarzania przez Unstructured: {e}")
-            return []
-        finally:
-            # Sprzątanie po sobie (usuwanie pliku tymczasowego)
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
+        # Przetwarzamy KAZDĄ STRONĘ (Document) z osobna, aby przypisać jej numer do wyniku
+        for doc in documents:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+                temp_file.write(doc.page_content.encode("utf-8"))
+                temp_file_path = temp_file.name
+
+            try:
+                loader = UnstructuredMarkdownLoader(temp_file_path, mode=self.mode)
+                unstructured_docs = loader.load()
+
+                # Dodajemy metadane ze strony (np. nr strony) do wygenerowanych chunków
+                for u_doc in unstructured_docs:
+                    u_doc.metadata.update(doc.metadata)
+                    final_chunks.append(u_doc)
+            except Exception as e:
+                print(f"Błąd podczas przetwarzania przez Unstructured: {e}")
+            finally:
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
+
+        return final_chunks

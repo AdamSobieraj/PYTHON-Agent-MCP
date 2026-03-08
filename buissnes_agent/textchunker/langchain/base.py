@@ -17,7 +17,7 @@ class ChunkingStrategy(ABC):
     """
 
     @abstractmethod
-    def split_text(self, text: str) -> List[Document]:
+    def split_documents(self, documents: List[Document]) -> List[Document]:
         """
         Metoda odpowiedzialna za logiczny podział tekstu na mniejsze fragmenty (Document objects).
         Każda strategia implementuje tę metodę na swój własny sposób.

@@ -84,7 +84,7 @@ def view_entries(limit: int = 5):
 
 if __name__ == "__main__":
     # Obsługa argumentu z linii poleceń
-    qty = 5
+    qty = 1000
     if len(sys.argv) > 3:
         try:
             qty = int(sys.argv[1])

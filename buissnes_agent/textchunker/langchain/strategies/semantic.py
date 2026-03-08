@@ -31,25 +31,23 @@ class SemanticStrategy(ChunkingStrategy):
             logger.error(f"SemanticStrategy: Failed to initialize embeddings. Error: {e}")
             raise e
 
-    def split_text(self, text: str) -> List[Document]:
+    def split_documents(self, documents: List[Document]) -> List[Document]:
         """
         Dzieli tekst na semantyczne fragmenty.
         """
         if not self.embeddings:
-            raise ValueError("Embeddings not initialized. Check env vars.")
+            raise ValueError("Embeddings not initialized.")
 
         text_splitter = SemanticChunker(
             self.embeddings,
             breakpoint_threshold_type="percentile",
-            breakpoint_threshold_amount=95.0,  # Wysoki próg - tnie tylko przy wyraźnej zmianie tematu
-            min_chunk_size=200  # Minimalna wielkość chunka (żeby nie tworzył "ogryzków")
+            breakpoint_threshold_amount=95.0,
+            min_chunk_size=200
         )
 
         try:
-            # create_documents oczekuje listy tekstów, my mamy jeden duży tekst
-            return text_splitter.create_documents([text])
+            # SemanticChunker również wspiera split_documents i dziedziczenie metadanych
+            return text_splitter.split_documents(documents)
         except Exception as e:
             logger.error(f"SemanticStrategy: Error during semantic split: {e}")
-            # Fallback: W razie błędu semantycznego (np. serwer embeddingów padł),
-            # można by tu rzucić wyjątek lub zwrócić tekst jako jeden chunk.
             raise e
