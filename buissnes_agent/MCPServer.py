@@ -155,3 +155,13 @@ if __name__ == "__main__":
         # metadane page
 
         # teraz startowanie ingestion python main.py --profile prod --collection-name my_custom_collection_v2
+
+        # dodanien nazy bucketa cli i docx do pdf
+
+        # in memory załadowanie tmp plik
+
+        # httpd i potem kong
+
+
+
+
