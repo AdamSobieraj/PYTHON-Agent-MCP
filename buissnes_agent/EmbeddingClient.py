@@ -32,7 +32,7 @@ class LocalEmbeddingClient(Embeddings):
 
         # Konfiguracja mechanizmu Retry
         self.max_retries = int(os.getenv("EMBEDDING_MAX_RETRIES"))
-        self.base_delay = os.getenv("EMBEDDING_DELAY")
+        self.base_delay = float(os.getenv("EMBEDDING_DELAY"))
 
         # Ograniczenie ilości tekstów wysyłanych w jednym żądaniu HTTP
         self.batch_size = batch_size or int(os.getenv("EMBEDDING_BATCH_SIZE"))
