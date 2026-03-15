@@ -82,6 +82,9 @@ class Config:
         # Rejestrujemy argument CLI, który nas interesuje
         parser.add_argument("--collection-name", type=str, help="Nadpisuje nazwę kolekcji Qdrant (z YAML)")
 
+        ### Dodajemy flagę dla bucketa
+        parser.add_argument("--bucket", type=str, help="Nadpisuje nazwę S3 Bucket")
+
         # Używamy parse_known_args, żeby zignorować inne flagi podane przez użytkownika
         args, _ = parser.parse_known_args()
 
@@ -94,6 +97,13 @@ class Config:
 
             # Nadpisujemy wartość w słowniku konfiguracyjnym
             self._data["vector_db"]["collection_name"] = args.collection_name
+
+        ### Zapisujemy bucket z CLI, jeśli został podany
+        if args.bucket:
+            logger.info(f"Wykryto argument CLI dla S3. Nadpisywanie: s3.bucket = '{args.bucket}'")
+            if "s3" not in self._data:
+                self._data["s3"] = {}
+            self._data["s3"]["bucket"] = args.bucket
 
     def _load_yaml(self, path: str) -> Dict:
         if not os.path.exists(path):
@@ -135,6 +145,14 @@ class Config:
                 # Ustawiamy wartość
                 target[keys[-1]] = env_val
                 logger.debug(f"Nadpisano z ENV: {keys} = {env_val}")
+
+        ### Bezpośrednie ładowanie S3_BUCKET z ENV (jeśli istnieje)
+        s3_bucket_env = os.getenv("S3_BUCKET")
+        if s3_bucket_env:
+            if "s3" not in self._data:
+                self._data["s3"] = {}
+            self._data["s3"]["bucket"] = s3_bucket_env
+            logger.info(f"Wykryto zmienną środowiskową S3_BUCKET. Ustawianie: s3.bucket = '{s3_bucket_env}'")
 
     def get(self, key_path: str, default: Any = None) -> Any:
         """

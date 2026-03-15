@@ -75,7 +75,8 @@ def run_generic_rag(query: str, collection_name: str) -> str:
     2. Szuka w bazie Qdrant wektorów najbardziej podobnych (Search).
     3. Zwraca surowy tekst dokumentacji wraz z metadanymi.
     """
-    top_k = 50  # Ilość zwracanych fragmentów
+
+    top_k = 10 or int(os.getenv("VECTOR_AMOUNT_RAG"))
 
     # Upewnij się, że mamy połączenie z bazą
     try:

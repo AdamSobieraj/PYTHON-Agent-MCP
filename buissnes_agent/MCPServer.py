@@ -150,8 +150,16 @@ if __name__ == "__main__":
         # xsd na serwerze i w metadanych link do nich
         # chunking pliku dodawanego w chacie z tymczasowym bazą
 
-        # nazwe kolekcji przez cli podawać x
         # pdf czy do markdown czy nie
-        # metadane page
 
-        # teraz startowanie ingestion python main.py --profile prod --collection-name my_custom_collection_v2
+        # teraz startowanie ingestion python main.py --profile prod --collection-name my_custom_collection_v2 --bucket mojsuperbucket
+
+        # docx do pdf
+
+        # in memory załadowanie tmp plik
+
+        # httpd i potem kong
+
+
+
+

@@ -50,7 +50,7 @@ def get_knowledge_base():
         from DataLoaderS3FileLoader import DataLoaderS3FileLoader
 
         data_loader = DataLoaderS3FileLoader(
-            bucket_name=os.getenv("S3_BUCKET"),
+            bucket_name=settings.get("s3.bucket"),
             prefix=settings.get("data_s3_source.input_path")
         )
     else:

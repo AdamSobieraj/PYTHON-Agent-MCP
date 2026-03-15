@@ -73,7 +73,7 @@ def upload_recursive(s3_client, bucket_name):
 
 
 if __name__ == "__main__":
-    bucket = os.getenv("S3_BUCKET")
+    bucket = settings.get("s3.bucket")
     if not bucket:
         print("Brak S3_BUCKET w .env")
         sys.exit(1)
