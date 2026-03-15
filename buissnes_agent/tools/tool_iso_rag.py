@@ -76,7 +76,7 @@ def run_generic_rag(query: str, collection_name: str) -> str:
     3. Zwraca surowy tekst dokumentacji wraz z metadanymi.
     """
 
-    top_k = 10 or os.getenv("VECTOR_AMOUNT_RAG")
+    top_k = 10 or int(os.getenv("VECTOR_AMOUNT_RAG"))
 
     # Upewnij się, że mamy połączenie z bazą
     try:
