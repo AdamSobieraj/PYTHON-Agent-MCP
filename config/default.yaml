@@ -25,7 +25,7 @@ data_source:
 # ==============================================================================
 chunking:
   # CHUNKING_MODULE=legacy (Opcje: legacy, langchain)
-  module: "legacy"
+  module: "langchain"
 
   # Parametry globalne (Fallback)
   default_size: 600
@@ -111,15 +111,15 @@ chunking:
         size: 500
         overlap: 0
       pdf:
-        strategy: "auto"
+        strategy: "semanticChunker"
         size: 1500
         overlap: 200
       docx:
-        strategy: "auto"
+        strategy: "semanticChunker"
         size: 1500
         overlap: 200
       xlsx:
-        strategy: "auto"
+        strategy: "recursive"
         size: 2000
         overlap: 0
       # Default fallback

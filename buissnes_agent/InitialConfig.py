@@ -3,10 +3,9 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from langchain_openai import OpenAIEmbeddings
-import httpx
-import json
+
 from QdrantDatabaseStore import QdrantDatabaseStore
+from buissnes_agent.EmbeddingClient import LocalEmbeddingClient
 from buissnes_agent.config_loader import settings
 
 # Konfiguracja podstawowego logowania
@@ -16,7 +15,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 KNOWLEDGE_BASE = None
-SSL_VERIFY = os.getenv("SSL_VERIFY", 'False').lower() in ('true', '1', 't')
 
 def get_knowledge_base():
     """
@@ -31,12 +29,12 @@ def get_knowledge_base():
     from KnowledgebasePipeline import SearchKnowledgebase
 
     # 1. Konfiguracja Chunkera
-    data_source = settings.get("data_source.type", "local")
+    data_source = settings.get("data_source.type")
 
     # 2. Konfiguracja Wymiaru Embeddings
     # OpenAI text-embedding-3-small/large = 1536, Nomic/Titan = 768
     try:
-        emb_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
+        emb_dim = int(os.getenv("EMBEDDING_DIM"))
     except ValueError:
         emb_dim = 1536
 
@@ -46,15 +44,13 @@ def get_knowledge_base():
     # Importujemy klasę dopiero tutaj, wewnątrz IF-a.
     # Dzięki temu nie musimy mieć boto3, jeśli używamy 'local'.
 
-    data_loader = None
-
     if data_source == "s3":
         logger.info("Dynamic Import: Ładowanie modułu S3...")
         # Import wewnątrz funkcji!
         from DataLoaderS3FileLoader import DataLoaderS3FileLoader
 
         data_loader = DataLoaderS3FileLoader(
-            bucket_name=os.getenv("S3_BUCKET"),
+            bucket_name=settings.get("s3.bucket"),
             prefix=settings.get("data_s3_source.input_path")
         )
     else:
@@ -67,21 +63,7 @@ def get_knowledge_base():
         )
 
     # 3. Inicjalizacja Klientów
-    sync_client = httpx.Client(
-        verify=SSL_VERIFY,
-    )
-    async_client = httpx.AsyncClient(
-        verify=SSL_VERIFY,
-    )
-    emb_model = os.getenv('EMBEDDING_MODEL')
-    client = OpenAIEmbeddings(
-        model=emb_model,
-        api_key=os.getenv("EMBEDDING_API_KEY"),
-        base_url=os.getenv("EMBEDDING_BASE_URL"),
-        http_client=sync_client,
-        http_async_client=async_client,
-        default_headers=json.loads(os.getenv('DEFAULT_HEADERS')),
-    )
+    embedding_client = LocalEmbeddingClient()
 
     store = QdrantDatabaseStore(
         url=os.getenv("QDRANT_API"),
@@ -92,10 +74,10 @@ def get_knowledge_base():
 
     # 4. Instancjalizacja Głównego Orkiestratora
     KNOWLEDGE_BASE = SearchKnowledgebase(
-        client=client,
+        client=embedding_client,
         database_store=store,
         data_loader=data_loader,
-        embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+        embedding_model=os.getenv("EMBEDDING_MODEL"),
         force_refresh=False  # Ustaw True w .env lub tutaj, aby wymusić przeładowanie bazy
     )
     return KNOWLEDGE_BASE
@@ -105,5 +87,4 @@ def get_knowledge_base():
 try:
     get_knowledge_base()
 except Exception as e:
-    # Logujemy błąd krytyczny, ale pozwalamy aplikacji działać (np. w trybie offline)
     logger.error(f"CRITICAL INIT ERROR: Nie udało się zainicjować bazy wiedzy: {e}")

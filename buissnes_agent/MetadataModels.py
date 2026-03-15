@@ -1,7 +1,5 @@
-
 from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Any, Optional
-
 
 @dataclass
 class BaseMetadata:
@@ -18,9 +16,8 @@ class BaseMetadata:
     page_number: Optional[int] = None
 
     def _clean_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Pomocnicza metoda usuwająca None z wyników."""
+        """Pomocnicza metoda usuwająca None z wyników. Zostawia przypisane wartości, w tym page_number."""
         return {k: v for k, v in data.items() if v is not None}
-
 
 @dataclass
 class FileMetadata(BaseMetadata):
@@ -28,10 +25,8 @@ class FileMetadata(BaseMetadata):
     Model używany przez Loadery (S3/Local).
     Reprezentuje cały plik przed pocięciem.
     """
-
     def to_dict(self) -> Dict[str, Any]:
         return self._clean_dict(asdict(self))
-
 
 @dataclass
 class ChunkMetadata(BaseMetadata):
@@ -39,7 +34,6 @@ class ChunkMetadata(BaseMetadata):
     Model używany przez Chunkery (LangChain/NoLib).
     Reprezentuje pojedynczy wektor w bazie Qdrant.
     """
-    # Pola specyficzne dla chunka (Payload w Qdrant)
     phrase: str = ""  # Treść fragmentu
     phrase_metadata_id: str = ""  # Unikalne ID
 
@@ -55,7 +49,7 @@ class ChunkMetadata(BaseMetadata):
         # 1. Wyciągamy i spłaszczamy extra_data
         extras = data.pop("extra_data", {})
 
-        # 2. Usuwamy None
+        # 2. Usuwamy None (jeśli page_number ma np. 1, to zostaje w słowniku!)
         clean_data = self._clean_dict(data)
 
         # 3. Scalamy (Schema ma priorytet nad extras)

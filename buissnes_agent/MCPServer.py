@@ -159,3 +159,22 @@ if __name__ == "__main__":
         # Jak wygląda nasza wewnętrzna procedura walidacji komunikatów płatniczych przed wysyłką?
         # hybryda
         # Co to jest komunikat camt.053 i jak go archiwizujemy w naszym systemie?
+
+        # nowe wytyczne
+        # nie przetważać xsd tylko podczas przetważania dokumentu pdf zrobic po tytułach
+        # xsd na serwerze i w metadanych link do nich
+        # chunking pliku dodawanego w chacie z tymczasowym bazą
+
+        # pdf czy do markdown czy nie
+
+        # teraz startowanie ingestion python main.py --profile prod --collection-name my_custom_collection_v2 --bucket mojsuperbucket
+
+        # docx do pdf
+
+        # in memory załadowanie tmp plik
+
+        # httpd i potem kong
+
+
+
+

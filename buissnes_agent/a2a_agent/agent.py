@@ -16,7 +16,7 @@ from pydantic import BaseModel, create_model, Field
 from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
 from google.adk.tools.mcp_tool.mcp_tool import McpTool
 from langchain_core.tools import BaseTool
-import patch_pydantic  # TODO REMOVE THIS LATER
+from a2a_agent import patch_pydantic  # TODO REMOVE THIS LATER
 from langfuse import get_client
 from langfuse.langchain import CallbackHandler
 import json
@@ -36,7 +36,7 @@ langfuse_handler = CallbackHandler()
 try:
 # Verify connection
     if langfuse.auth_check():
-        print("Langfuse testscripts is authenticated and ready!")
+        print("Langfuse is authenticated and ready!")
         langfuse_enabled = True
     else:
         print("Authentication failed. Please check your credentials and host.")

@@ -1,10 +1,12 @@
-import os
+import logging
 from typing import List
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
 from langchain_experimental.text_splitter import SemanticChunker
 
+from buissnes_agent.EmbeddingClient import LocalEmbeddingClient
 from buissnes_agent.textchunker.langchain.base import ChunkingStrategy
+
+logger = logging.getLogger(__name__)
 
 class SemanticStrategy(ChunkingStrategy):
     """
@@ -18,29 +20,34 @@ class SemanticStrategy(ChunkingStrategy):
     2. Oblicza podobieństwo między sąsiednimi zdaniami.
     3. Jeśli podobieństwo spada poniżej progu (breakpoint threshold), uznaje to za zmianę tematu i robi cięcie.
 
-    **Optymalizacja:**
-    Inicjalizacja modelu OpenAI Embeddings odbywa się teraz wewnątrz tej klasy.
-    Dzięki temu, jeśli użytkownik wybierze strategię "Recursive", nie marnujemy zasobów
-    na łączenie się z API OpenAI.
     """
 
     def __init__(self):
-        # Konfiguracja Embeddingów (Inicjalizowana tylko wewnątrz tej strategii)
-        self.embeddings = OpenAIEmbeddings(
-            model=os.getenv('EMBEDDING_MODEL'),
-            base_url=os.getenv('EMBEDDING_BASE_URL'),
-            api_key=os.getenv('EMBEDDING_API_KEY'),
-            check_embedding_ctx_length=False
-        )
+        # Inicjalizacja klienta embeddingów.
+        try:
+            self.embeddings = LocalEmbeddingClient()
+            logger.info("SemanticStrategy: Initialized EmbeddingClient successfully.")
+        except Exception as e:
+            logger.error(f"SemanticStrategy: Failed to initialize embeddings. Error: {e}")
+            raise e
 
-    def split_text(self, text: str) -> List[Document]:
+    def split_documents(self, documents: List[Document]) -> List[Document]:
+        """
+        Dzieli tekst na semantyczne fragmenty.
+        """
         if not self.embeddings:
-            raise ValueError("Embeddings not initialized. Check env vars.")
+            raise ValueError("Embeddings not initialized.")
 
         text_splitter = SemanticChunker(
             self.embeddings,
             breakpoint_threshold_type="percentile",
-            breakpoint_threshold_amount=95.0,  # Wysoki próg - tnie tylko przy wyraźnej zmianie tematu
+            breakpoint_threshold_amount=95.0,
             min_chunk_size=200
         )
-        return text_splitter.create_documents([text])
+
+        try:
+            # SemanticChunker również wspiera split_documents i dziedziczenie metadanych
+            return text_splitter.split_documents(documents)
+        except Exception as e:
+            logger.error(f"SemanticStrategy: Error during semantic split: {e}")
+            raise e

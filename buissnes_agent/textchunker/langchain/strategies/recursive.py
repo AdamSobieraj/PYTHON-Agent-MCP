@@ -22,10 +22,11 @@ class RecursiveStrategy(ChunkingStrategy):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
-    def split_text(self, text: str) -> List[Document]:
+    def split_documents(self, documents: List[Document]) -> List[Document]:
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
             separators=["\n\n", "\n", ".", " ", ""]
         )
-        return text_splitter.create_documents([text])
+        # MAGIA: split_documents potnie tekst zachowując numer strony (metadane) z dokumentu wejściowego!
+        return text_splitter.split_documents(documents)

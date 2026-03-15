@@ -21,11 +21,20 @@ class MarkdownHeaderStrategy(ChunkingStrategy):
     ponieważ tnie strictly po strukturze dokumentu.
     """
 
-    def split_text(self, text: str) -> List[Document]:
+    def split_documents(self, documents: List[Document]) -> List[Document]:
         headers_to_split_on = [("#", "Header 1"), ("##", "Header 2"), ("###", "Header 3")]
-        # strip_headers=False -> Nagłówek zostaje w tekście chunka (lepsze dla RAG)
         markdown_splitter = MarkdownHeaderTextSplitter(
             headers_to_split_on=headers_to_split_on,
             strip_headers=False
         )
-        return markdown_splitter.split_text(text)
+
+        final_chunks = []
+        for doc in documents:
+            # Dzielimy treść pojedynczej strony (doc)
+            chunks = markdown_splitter.split_text(doc.page_content)
+            # Ręcznie dodajemy metadane strony do nowych chunków
+            for chunk in chunks:
+                chunk.metadata.update(doc.metadata)
+                final_chunks.append(chunk)
+
+        return final_chunks

@@ -20,6 +20,7 @@ from ...MetadataModels import ChunkMetadata
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
+
 class LangChainChunker:
     """
     ### Klasa Główna: Orchestrator (Context)
@@ -42,7 +43,7 @@ class LangChainChunker:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
-        logger.info(f"ContentChunker initialized. Strategy: {chunk_strategy}, Max Chunk Size: {chunk_size}")
+        logger.info(f"LangChainChunker initialized. Strategy: {chunk_strategy}, Max Chunk Size: {chunk_size}")
 
     def _get_strategy(self) -> ChunkingStrategy:
         """
@@ -67,44 +68,43 @@ class LangChainChunker:
     # =========================================================================
     # METODA: process_content (Wspólna metoda łącząca wejścia)
     # =========================================================================
-    def process_content(self, content: str, base_metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def process_content(self, documents: List[Document]) -> List[Dict[str, Any]]:
         """
+        Zwraca listę słowników gotowych do wektoryzacji i zapisu w bazie danych.
+        Struktura: [{"text": "...", "metadata": {"page_number": 1, ...}}]
+
         ### Główny Pipeline Przetwarzania
 
         Łączy wybraną strategię podziału z zarządzaniem limitami.
 
         **Etapy procesu:**
         1.  **Primary Split (Delegacja):** Zlecamy podział wyspecjalizowanej klasie strategii.
-        2.  **Metadata Injection:** Do każdego powstałego fragmentu doklejane są metadane źródłowe.
+        2.  **Metadata Cleanup:** Ujednolicenie kluczy metadanych.
         3.  **Secondary Split (Hard Limit Enforcer):** Sprawdza, czy logiczne chunki nie są za duże.
         4.  **Formatting:** Nadaje unikalne ID i zwraca strukturę słownikową.
         """
 
+        if not documents:
+            return []
+
         # Krok 1: Wybór strategii i wykonanie cięcia (Primary Split)
-        # Delegujemy zadanie do odpowiedniej klasy z katalogu 'strategies/'
+        # --- Przekazujemy listę dokumentów do split_documents ---
         strategy = self._get_strategy()
-        splits: List[Document] = strategy.split_text(content)
+        splits: List[Document] = strategy.split_documents(documents)
 
-        # Krok 2: Smart Metadata Merge (Inteligentne scalanie)
-        # Łączymy metadane z pliku z metadanymi z chunka (np. ze strategii PDF)
+        # Krok 2: Smart Metadata Cleanup
+        # Ponieważ metadane pliku zostały już scalone w Orkiestratorze, robimy tu tylko
+        # ewentualną naprawę kluczy (np. Langchain czasami tworzy klucz "page" zamiast "page_number").
         for doc in splits:
-            # Normalizacja klucza strony (LangChain 'page' -> nasz 'page_number')
             if "page" in doc.metadata:
-                doc.metadata["page_number"] = doc.metadata.pop("page")
-
-            # Scalanie z base_metadata bez nadpisywania ważnych pól
-            for key, value in base_metadata.items():
-                # Ochrona page_number przed nadpisaniem przez None
-                if key == "page_number" and doc.metadata.get("page_number") is not None:
-                    continue
-
-                # Dodajemy tylko jeśli brakuje lub jest puste
-                if key not in doc.metadata or (doc.metadata[key] is None and value is not None):
-                    doc.metadata[key] = value
+                if doc.metadata.get("page_number") is None:
+                    doc.metadata["page_number"] = doc.metadata.pop("page")
+                else:
+                    doc.metadata.pop("page")  # Usuwamy ewentualny duplikat
 
         # Krok 3: Secondary Split (Hard Limit / Bezpiecznik)
         # Strategie logiczne (Header/Semantic) mogą zwrócić chunk 5000 znaków, jeśli rozdział był długi.
-        # Metoda _enforce_limit pocięcie go na mniejsze kawałki, zachowując metadane.
+        # Metoda _enforce_limit tnie go na mniejsze kawałki, zachowując metadane.
         final_documents = splits
         if self.chunk_size > 0:
             final_documents = self._enforce_limit(splits)
@@ -128,6 +128,7 @@ class LangChainChunker:
 
             # Wyciągamy known fields
             schema_data = {k: meta_dict.get(k) for k in known_keys}
+
             # Ustawiamy domyślne source jeśli puste
             if not schema_data["source"]:
                 schema_data["source"] = "unknown"
@@ -175,8 +176,6 @@ class LangChainChunker:
         final_docs = []
 
         # Używamy Recursive jako uniwersalnej metody docinania
-        # Używamy tutaj bezpośrednio klasy bibliotecznej, a nie naszej strategii,
-        # bo potrzebujemy precyzyjnej kontroli nad listą dokumentów.
         recursive_cutter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
