@@ -31,16 +31,25 @@ class LocalEmbeddingClient(Embeddings):
         self.dimensions = int(dimensions or os.getenv("EMBEDDING_DIM"))
 
         # Konfiguracja mechanizmu Retry
-        self.max_retries = int(os.getenv("EMBEDDING_MAX_RETRIES"))
-        self.base_delay = float(os.getenv("EMBEDDING_DELAY"))
+        self.max_retries = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
+        self.base_delay = float(os.getenv("EMBEDDING_DELAY", "1.0"))
 
         # Ograniczenie ilości tekstów wysyłanych w jednym żądaniu HTTP
-        self.batch_size = batch_size or int(os.getenv("EMBEDDING_BATCH_SIZE"))
+        self.batch_size = batch_size or int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
 
         self.endpoint_url = f"{self.base_url}"
 
         # 2. Inicjalizacja stałej sesji HTTP (przyspiesza zapytania w pętli - Connection Pooling)
         self.session = requests.Session()
+        
+        # Wyłączenie weryfikacji SSL domyślnie (ominięcie blokad w korpo sieci),
+        # chyba że explicite włączono w .env
+        self.session.verify = os.getenv("SSL_VERIFY", 'False').lower() in ('true', '1', 't')
+        
+        if not self.session.verify:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
         self.session.headers.update({
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
