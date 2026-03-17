@@ -74,7 +74,13 @@ class LocalEmbeddingClient(Embeddings):
 
         for attempt in range(self.max_retries):
             try:
-                response = self.session.post(self.endpoint_url, json=payload, timeout=120)
+                logger.info(f"Sending POST to {self.endpoint_url} with verify={self.session.verify}")
+                response = self.session.post(
+                    self.endpoint_url, 
+                    json=payload, 
+                    timeout=120,
+                    verify=self.session.verify
+                )
 
                 if response.status_code == 200:
                     data = response.json()
