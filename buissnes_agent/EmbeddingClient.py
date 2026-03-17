@@ -46,16 +46,16 @@ class LocalEmbeddingClient(Embeddings):
         # chyba że explicite włączono w .env
         self.session.verify = os.getenv("SSL_VERIFY", 'False').lower() in ('true', '1', 't')
         
+        # Wymuś na requests ignorowanie systemowych i pythonowych certyfikatów CA
+        # os.environ['CURL_CA_BUNDLE'] = ''
+        # os.environ['REQUESTS_CA_BUNDLE'] = ''
+        if(os.getenv("TRUST_ENV_FALSE", 'False').lower() in ('true', '1', 't')):
+            self.session.trust_env = False 
+
+        if(os.getenv("TRUST_ENV_TRUE", 'False').lower() in ('true', '1', 't')):
+            self.session.trust_env = True 
+
         if not self.session.verify:
-            # Wymuś na requests ignorowanie systemowych i pythonowych certyfikatów CA
-            # os.environ['CURL_CA_BUNDLE'] = ''
-            # os.environ['REQUESTS_CA_BUNDLE'] = ''
-            if(os.getenv("TRUST_ENV_FALSE", 'False').lower() in ('true', '1', 't')):
-                self.session.trust_env = False 
-
-            if(os.getenv("TRUST_ENV_TRUE", 'False').lower() in ('true', '1', 't')):
-                self.session.trust_env = True 
-
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             
