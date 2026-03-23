@@ -1,17 +1,22 @@
 import io
-import json
 import logging
 import os
 import sys
 from typing import Dict, Any, Generator, Tuple, List
 
-import docx
-import openpyxl
-import pypdf
 from langchain_core.documents import Document
 
 from DataLoaderS3Service import DataLoaderS3Service
 from buissnes_agent.MetadataModels import FileMetadata
+# Importujemy nasze moduły parserów
+from buissnes_agent.parsers import (
+    BaseDocumentParser,
+    XlsxParser,
+    DocxParser,
+    PdfParser,
+    TextParser,
+    PptxParser
+)
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
@@ -36,6 +41,16 @@ class DataLoaderS3FileLoader:
             logger.warning("!!! UWAGA: Nie podano folderu (prefix). Skrypt pobierze CAŁY BUCKET !!!")
 
         self.s3_service = DataLoaderS3Service()
+
+        # Inicjalizacja parserów i mapowanie rozszerzeń
+        self.parsers: Dict[str, BaseDocumentParser] = {
+            ".xlsx": XlsxParser(),
+            ".pdf": PdfParser(),
+            ".docx": DocxParser(),
+            ".pptx": PptxParser(),
+        }
+        # Domyślny parser dla tekstów (TXT, JSON, XML, itd.)
+        self.default_parser = TextParser()
 
     def list_objects(self) -> Generator[str, None, None]:
         # Przekazujemy prefix do serwisu S3. AWS zwróci tylko obiekty zaczynające się od tego ciągu.
@@ -65,26 +80,23 @@ class DataLoaderS3FileLoader:
         base_metadata = meta_obj.to_dict()
 
         try:
-            # --- ZMIANA: Pobieramy bajty do pamięci RAM (bez zapisu na dysk) ---
+            # 1. Pobieramy bajty z chmury do pamięci RAM
             file_bytes = self.s3_service.download_bytes(self.bucket_name, s3_key)
-            file_stream = io.BytesIO(file_bytes)
 
-            # --- XLSX (Excel) ---
-            if ext == ".xlsx":
-                documents = self._process_xlsx(file_stream, filename)
-            # --- PDF ---
-            elif ext == ".pdf":
-                documents = self._process_pdf(file_stream, filename)
-            # --- DOCX ---
-            elif ext == ".docx":
-                documents = self._process_docx(file_stream, filename)
-            # --- TEKSTOWE (TXT, MD, XML, JSON) ---
+            # 2. Wybieramy odpowiedni parser
+            parser = self.parsers.get(ext, self.default_parser)
+
+            # 3. Parsowanie - w zależności od formatu wysyłamy bajty lub strumień (BytesIO)
+            # TextParser poradzi sobie z czystymi bajtami. Pozostałe (openpyxl, docx, pypdf) potrzebują BytesIO
+            if ext in self.parsers:
+                file_source = io.BytesIO(file_bytes)
             else:
-                text_content = file_bytes.decode("utf-8", errors="ignore")
-                if text_content.strip():
-                    documents = [Document(page_content=text_content, metadata={"page_number": 1})]
+                file_source = file_bytes
 
-            # Wzbogacamy każdą stronę (Document) o globalne metadane pliku S3
+            # 4. Magia dzieje się tutaj - parser przetwarza plik w pamięci i oddaje Markdown
+            documents = parser.parse(file_source, ext=ext)
+
+            # 5. Wzbogacamy strony o metadane globalne S3
             for doc in documents:
                 merged_meta = base_metadata.copy()
                 merged_meta.update(doc.metadata)
@@ -95,122 +107,6 @@ class DataLoaderS3FileLoader:
         except Exception as e:
             logger.error(f"Krytyczny błąd przy pliku {s3_key}: {e}")
             return [], {}  # <--- POPRAWKA: Zwraca pustą listę zamiast "", zapobiega błędom w Orkiestratorze
-
-    def _process_xlsx(self, file_stream: io.BytesIO, filename: str) -> List[Document]:
-        """
-        Pobiera plik XLSX z S3 i konwertuje go na JSON String.
-        """
-        documents = []
-        try:
-            # openpyxl potrafi czytać bezpośrednio ze strumienia BytesIO
-            wb = openpyxl.load_workbook(file_stream, data_only=True)
-
-            for i, sheet in enumerate(wb.worksheets):
-                sheet_data = []
-                for row in sheet.iter_rows(values_only=True):
-                    if any(cell is not None for cell in row):
-                        clean_row = [str(cell) if cell is not None else None for cell in row]
-                        sheet_data.append(clean_row)
-
-                if sheet_data:
-                    sheet_json_str = json.dumps({sheet.title: sheet_data}, ensure_ascii=False)
-                    doc = Document(
-                        page_content=sheet_json_str,
-                        metadata={"page_number": i + 1, "sheet_name": sheet.title}
-                    )
-                    documents.append(doc)
-            return documents
-        except Exception as e:
-            logger.error(f"Błąd przetwarzania XLSX {filename}: {e}")
-            return []
-
-    def _process_pdf(self, file_stream: io.BytesIO, filename: str) -> List[Document]:
-        """
-         Pobiera PDF z S3 i ekstrahuje tekst.
-         """
-        documents = []
-        try:
-            # pypdf również czyta strumienie z pamięci
-            reader = pypdf.PdfReader(file_stream)
-
-            for i, page in enumerate(reader.pages):
-                extracted = page.extract_text()
-                if extracted and extracted.strip():
-                    doc = Document(
-                        page_content=extracted,
-                        metadata={"page_number": i + 1}
-                    )
-                    documents.append(doc)
-            return documents
-        except Exception as e:
-            logger.error(f"Błąd przetwarzania PDF {filename}: {e}")
-            return []
-
-    def _process_docx(self, file_stream: io.BytesIO, filename: str) -> List[Document]:
-        """
-        Pobiera DOCX z S3 (strumień RAM) i symuluje podział na strony
-        szukając w kodzie XML twardych enterów i miękkich podziałów Worda.
-        """
-        documents = []
-        try:
-            doc = docx.Document(file_stream)
-
-            current_page_text = []
-            current_char_count = 0
-            page_num = 1
-
-            # Zakładamy średnio 2500 znaków na stronę A4 (możesz to dostosować)
-            MAX_CHARS_PER_PAGE = 2500
-
-            for para in doc.paragraphs:
-                # 1. Sprawdzamy tagi w XML
-                hard_breaks = para._element.xpath('.//w:br[@w:type="page"]')
-                rendered_breaks = para._element.xpath('.//w:lastRenderedPageBreak')
-
-                # 2. Sprawdzamy heurystykę (czy uzbieraliśmy już tyle tekstu, że to na pewno nowa strona)
-                limit_reached = current_char_count >= MAX_CHARS_PER_PAGE
-
-                # Jeśli wystąpił fizyczny znacznik LUB przekroczyliśmy limit znaków
-                if hard_breaks or rendered_breaks or limit_reached:
-
-                    joined_text = "\n".join(current_page_text).strip()
-                    if joined_text:
-                        documents.append(Document(page_content=joined_text, metadata={"page_number": page_num}))
-
-                    # Resetujemy bufory na nową stronę
-                    current_page_text = []
-                    current_char_count = 0
-                    page_num += 1
-
-                # Zbieramy tekst z obecnego paragrafu
-                text = para.text.strip()
-                if text:
-                    current_page_text.append(text)
-                    current_char_count += len(text)
-
-            # Zapisujemy to, co zostało po zakończeniu pętli (ostatnia strona)
-            if current_page_text:
-                joined_text = "\n".join(current_page_text).strip()
-                if joined_text:
-                    documents.append(Document(page_content=joined_text, metadata={"page_number": page_num}))
-
-            return documents
-        except Exception as e:
-            logger.error(f"Błąd parsowania DOCX {filename}: {e}")
-            return []
-
-    def _process_text(self, file_bytes: bytes, filename: str) -> List[Document]:
-        """
-        Przetwarza pobrane bajty z S3 (TXT, MD, XML, JSON, etc.) i zwraca 1 stronę.
-        """
-        try:
-            text_content = file_bytes.decode("utf-8", errors="ignore")
-            if text_content.strip():
-                return [Document(page_content=text_content, metadata={"page_number": 1})]
-            return []
-        except Exception as e:
-            logger.error(f"Błąd dekodowania tekstu {filename}: {e}")
-            return []
 
     def _extract_domain_first(self, s3_key: str) -> str:
         """

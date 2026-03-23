@@ -175,6 +175,8 @@ if __name__ == "__main__":
 
         # httpd i potem kong
 
+        # dynamicznie towrzone toole
+
 
 
 
