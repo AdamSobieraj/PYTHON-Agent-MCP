@@ -22,6 +22,14 @@ class PdfParser(BaseDocumentParser):
         documents = []
         source_name = os.path.basename(file_source) if isinstance(file_source, str) else "strumień pamięci S3"
 
+        # Konfiguracja marginesów do obcięcia (w punktach typograficznych)
+        # Standardowa strona A4 ma wysokość ok. 842 punktów.
+        # Zwykle 50-70 punktów wystarcza na usunięcie stopki.
+        BOTTOM_MARGIN_TO_CROP = 60
+
+        # Jeśli jest też powtarzający się nagłówek na górze, możesz odciąć górę:
+        TOP_MARGIN_TO_CROP = 50
+
         try:
             # 1. Wczytanie pliku PDF z obsługą pamięci RAM i dysku lokalnego
             if isinstance(file_source, str):
@@ -35,6 +43,23 @@ class PdfParser(BaseDocumentParser):
                 pdf_doc = fitz.Document(stream=file_source.read(), filetype="pdf")
             else:
                 raise ValueError("Nieobsługiwany typ źródła dla PDF")
+
+            # 1.5 Usuwanie stopek (przycinanie Cropbox'a przed analizą LLM)
+            for page in pdf_doc:
+                rect = page.rect  # Pobierz obecne wymiary strony (x0, y0, x1, y1)
+
+                # Definiujemy nowy prostokąt odcinając dół (zmniejszamy y1)
+                # Opcjonalnie odcinając górę (zwiększamy y0)
+                new_rect = fitz.Rect(
+                    rect.x0,
+                    rect.y0 + TOP_MARGIN_TO_CROP,  # Zmień na: rect.y0 + TOP_MARGIN_TO_CROP jeśli chcesz uciąć też nagłówek
+                    rect.x1,
+                    rect.y1 - BOTTOM_MARGIN_TO_CROP
+                )
+
+                # Ustawiamy nowy obszar roboczy strony.
+                # pymupdf4llm weźmie pod uwagę TYLKO tekst wewnątrz tego prostokąta.
+                page.set_cropbox(new_rect)
 
             # 2. Magia konwersji: generujemy Markdown z podziałem na strony
             # page_chunks=True zwraca listę słowników, gdzie każdy słownik to jedna strona
@@ -63,6 +88,12 @@ class PdfParser(BaseDocumentParser):
 
 
 '''
+UWAGA
+
+Wartość 60 użyta w kodzie to punkty (1 punkt = 1/72 cala). Standardowa strona A4 ma wysokość 842 punkty.
+Wartość pomiędzy 50 a 80 zazwyczaj idealnie "zjada" numerację stron i stopkę, nie ucinając jednocześnie właściwego 
+tekstu dokumentu. Jeśli stopka jest wyjątkowo wysoka, można po prostu zwiększyć tę liczbę (np. do 100).
+
 Aby przekształcić pliki PDF na prawdziwy format Markdown (z zachowaniem nagłówków, pogrubień, list, 
 a przede wszystkim tabel), musimy porzucić bibliotekę pypdf. Narzędzie to potrafi jedynie "wypluć" 
 ciąg czystego tekstu i nie rozumie układu strony (layoutu).
