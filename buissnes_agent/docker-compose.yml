@@ -11,6 +11,12 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   # --- LOKALNE S3 (MINIO) ---
   minio:
@@ -26,7 +32,62 @@ services:
     volumes:
       - minio_data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # --- BAZA DANYCH METRYK (POSTGRESQL) ---
+  postgres-metrics:
+    image: postgres:15-alpine
+    container_name: postgres_metrics
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: rag_metrics
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_metrics_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_metrics_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rag_metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --- OPCJONALNIE: PGADMIN (GUI dla PostgreSQL) ---
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    restart: unless-stopped
+    depends_on:
+      - postgres-metrics
 
 volumes:
   qdrant_storage:
+    driver: local
   minio_data:
+    driver: local
+  postgres_metrics_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+
+# Opcjonalnie: custom network
+networks:
+  default:
+    name: rag_network
+    driver: bridge
