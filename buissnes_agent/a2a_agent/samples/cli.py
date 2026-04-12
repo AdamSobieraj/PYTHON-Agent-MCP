@@ -14,52 +14,49 @@ from a2a.types import Message, Part, Role, SendMessageRequest, TaskState
 
 
 async def _handle_stream(
-    stream: Any,
-    current_task_id: str | None,
+    stream: Any, current_task_id: str | None
 ) -> str | None:
     async for event, task in stream:
         if not task:
             continue
-
         if not current_task_id:
             current_task_id = task.id
 
-        if event and event.HasField('status_update'):
-            state_name = TaskState.Name(event.status_update.status.state)
-            print(f'TaskStatusUpdate [state={state_name}]:', end=' ')
-            if event.status_update.status.HasField('message'):
-                for part in event.status_update.status.message.parts:
+        if event:
+            if event.HasField('status_update'):
+                state_name = TaskState.Name(event.status_update.status.state)
+                print(f'TaskStatusUpdate [state={state_name}]:', end=' ')
+                if event.status_update.status.HasField('message'):
+                    for part in event.status_update.status.message.parts:
+                        if part.text:
+                            print(part.text, end=' ')
+                print()
+
+                if (
+                    event.status_update.status.state
+                    == TaskState.TASK_STATE_COMPLETED
+                ):
+                    current_task_id = None
+                    print('--- Task Completed ---')
+
+            elif event.HasField('artifact_update'):
+                print(
+                    f'TaskArtifactUpdate [name={event.artifact_update.artifact.name}]:',
+                    end=' ',
+                )
+                for part in event.artifact_update.artifact.parts:
                     if part.text:
                         print(part.text, end=' ')
-            print()
-
-            if (
-                event.status_update.status.state
-                == TaskState.TASK_STATE_COMPLETED
-            ):
-                current_task_id = None
-                print('--- Task Completed ---')
-
-        elif event and event.HasField('artifact_update'):
-            print(
-                f'TaskArtifactUpdate [name={event.artifact_update.artifact.name}]:',
-                end=' ',
-            )
-            for part in event.artifact_update.artifact.parts:
-                if part.text:
-                    print(part.text, end=' ')
-            print()
+                print()
 
     return current_task_id
 
 
 async def main() -> None:
-    """Run the business agent test client."""
-    parser = argparse.ArgumentParser(description='Business Agent test client')
+    """Run the A2A terminal client."""
+    parser = argparse.ArgumentParser(description='A2A Terminal Client')
     parser.add_argument(
-        '--url',
-        default=os.getenv('A2A_AGENT_URL', 'http://127.0.0.1:10000'),
-        help='Agent base URL',
+        '--url', default='http://127.0.0.1:41241', help='Agent base URL'
     )
     parser.add_argument(
         '--transport',
@@ -79,13 +76,14 @@ async def main() -> None:
     async with httpx.AsyncClient() as httpx_client:
         resolver = A2ACardResolver(httpx_client, args.url)
         card = await resolver.get_agent_card()
-        print('\nAgent Card Found:')
+        print('\n✓ Agent Card Found:')
         print(f'  Name: {card.name}')
 
     client = await create_client(card, client_config=config)
 
     actual_transport = getattr(client, '_transport', client)
     print(f'  Picked Transport: {actual_transport.__class__.__name__}')
+
     print('\nConnected! Send a message or type /quit to exit.')
 
     current_task_id = None
@@ -116,8 +114,8 @@ async def main() -> None:
         try:
             stream = client.send_message(request)
             current_task_id = await _handle_stream(stream, current_task_id)
-        except (httpx.RequestError, grpc.RpcError) as exc:
-            print(f'Error communicating with agent: {exc}')
+        except (httpx.RequestError, grpc.RpcError) as e:
+            print(f'Error communicating with agent: {e}')
 
     await client.close()
 

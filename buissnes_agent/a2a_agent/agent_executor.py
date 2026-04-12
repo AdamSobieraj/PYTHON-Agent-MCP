@@ -4,20 +4,16 @@ from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
 from a2a.types import (
-    InternalError,
     InvalidParamsError,
     Part,
     TaskState,
-    TextPart,
     UnsupportedOperationError,
 )
-from a2a.utils import (
-    new_agent_text_message,
-    new_task,
-)
-from a2a.utils.errors import ServerError
 
-from a2a_agent.agent import AnalysisAgent
+try:
+    from .agent import AnalysisAgent
+except ImportError:
+    from agent import AnalysisAgent  # type: ignore
 
 
 logging.basicConfig(level=logging.INFO)
@@ -25,9 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 class AnalysisAgentExecutor(AgentExecutor):
-    """Currency Conversion AgentExecutor Example."""
+    """A2A executor for the business analysis agent."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.agent = AnalysisAgent()
 
     async def execute(
@@ -35,57 +31,90 @@ class AnalysisAgentExecutor(AgentExecutor):
         context: RequestContext,
         event_queue: EventQueue,
     ) -> None:
-        error = self._validate_request(context)
-        if error:
-            raise ServerError(error=InvalidParamsError())
+        error_message = self._validate_request(context)
+        if error_message:
+            raise InvalidParamsError(message=error_message)
+
+        task_id = context.task_id
+        context_id = context.context_id
+        if not task_id or not context_id:
+            raise InvalidParamsError(
+                message='Both task_id and context_id are required.'
+            )
+
+        updater = TaskUpdater(
+            event_queue=event_queue,
+            task_id=task_id,
+            context_id=context_id,
+        )
+
+        await updater.start_work(
+            message=updater.new_agent_message(
+                parts=[Part(text='Processing your request...')]
+            )
+        )
 
         query = context.get_user_input()
-        task = context.current_task
-        if not task:
-            task = new_task(context.message)  # type: ignore
-            await event_queue.enqueue_event(task)
-        updater = TaskUpdater(event_queue, task.id, task.context_id)
-        try:
-            async for item in self.agent.stream(query, task.context_id):
-                is_task_complete = item['is_task_complete']
-                require_user_input = item['require_user_input']
 
-                if not is_task_complete and not require_user_input:
-                    await updater.update_status(
-                        TaskState.working,
-                        new_agent_text_message(
-                            item['content'],
-                            task.context_id,
-                            task.id,
-                        ),
-                    )
-                elif require_user_input:
-                    await updater.update_status(
-                        TaskState.input_required,
-                        new_agent_text_message(
-                            item['content'],
-                            task.context_id,
-                            task.id,
-                        ),
-                        final=True,
-                    )
-                    break
-                else:
+        try:
+            async for item in self.agent.stream(query, context_id):
+                content = item.get('content') or 'Processing your request...'
+
+                if item.get('is_task_complete'):
                     await updater.add_artifact(
-                        [Part(root=TextPart(text=item['content']))],
-                        name='conversion_result',
+                        parts=[Part(text=content)],
+                        name='analysis_result',
+                        last_chunk=True,
                     )
                     await updater.complete()
-                    break
+                    return
 
-        except Exception as e:
-            logger.error(f'An error occurred while streaming the response: {e}')
-            raise ServerError(error=InternalError()) from e
+                if item.get('require_user_input'):
+                    await updater.requires_input(
+                        message=updater.new_agent_message(
+                            parts=[Part(text=content)]
+                        )
+                    )
+                    return
 
-    def _validate_request(self, context: RequestContext) -> bool:
-        return False
+                await updater.update_status(
+                    TaskState.TASK_STATE_WORKING,
+                    message=updater.new_agent_message(
+                        parts=[Part(text=content)]
+                    ),
+                )
+        except Exception:
+            logger.exception('Agent execution failed for task %s', task_id)
+            raise
+
+    def _validate_request(self, context: RequestContext) -> str | None:
+        if not context.message:
+            return 'A user message is required.'
+
+        if not context.get_user_input().strip():
+            return 'A text input message is required.'
+
+        return None
 
     async def cancel(
-        self, context: RequestContext, event_queue: EventQueue
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
     ) -> None:
-        raise ServerError(error=UnsupportedOperationError())
+        task_id = context.task_id
+        context_id = context.context_id
+        if not task_id or not context_id:
+            raise UnsupportedOperationError(
+                message='Cannot cancel a task without task_id and context_id.'
+            )
+
+        updater = TaskUpdater(
+            event_queue=event_queue,
+            task_id=task_id,
+            context_id=context_id,
+        )
+        await updater.cancel(
+            message=updater.new_agent_message(
+                parts=[Part(text='Task cancelled by request.')]
+            )
+        )
