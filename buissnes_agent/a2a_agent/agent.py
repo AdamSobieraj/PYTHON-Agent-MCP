@@ -1,27 +1,31 @@
-import os
+import json
 import logging
+import os
 
 from collections.abc import AsyncIterable
 from typing import Any, Literal
 
 import httpx
-
-from langchain_core.messages import AIMessage, ToolMessage
-from langchain_core.tools import tool
 import litellm
+from google.adk.tools.mcp_tool.mcp_session_manager import (
+    StreamableHTTPServerParams,
+)
+from google.adk.tools.mcp_tool.mcp_tool import McpTool
+from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.tools import BaseTool, tool
+from langfuse import get_client
+from langfuse.langchain import CallbackHandler
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
-from pydantic import BaseModel, create_model, Field
-from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
-from google.adk.tools.mcp_tool.mcp_tool import McpTool
-from langchain_core.tools import BaseTool
-from a2a_agent import patch_pydantic  # TODO REMOVE THIS LATER
-from langfuse import get_client
-from langfuse.langchain import CallbackHandler
-import json
+from pydantic import BaseModel, Field, create_model
 
-from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPServerParams
+try:
+    from . import patch_pydantic  # noqa: F401
+except ImportError:
+    import patch_pydantic  # type: ignore  # noqa: F401
+
 logger = logging.getLogger(__name__)
 memory = MemorySaver()
 
@@ -292,4 +296,4 @@ class AnalysisAgent:
             ),
         }
 
-    SUPPORTED_CONTENT_TYPES = ['text', 'text/plain']
+    SUPPORTED_CONTENT_TYPES = ['text']
