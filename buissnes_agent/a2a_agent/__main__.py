@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -14,7 +15,7 @@ from google.protobuf.json_format import MessageToDict
 try:
     from . import patch_a2a_sdk  # noqa: F401
 except ImportError:
-    import patch_a2a_sdk  # type: ignore  # noqa: F401
+    from buissnes_agent.a2a_agent import patch_a2a_sdk  # type: ignore  # noqa: F401
 
 from a2a.compat.v0_3 import a2a_v0_3_pb2_grpc
 from a2a.compat.v0_3.grpc_handler import CompatGrpcHandler
@@ -40,8 +41,8 @@ try:
     from .agent import AnalysisAgent
     from .agent_executor import AnalysisAgentExecutor
 except ImportError:
-    from agent import AnalysisAgent  # type: ignore
-    from agent_executor import AnalysisAgentExecutor  # type: ignore
+    from buissnes_agent.a2a_agent.agent import AnalysisAgent  # type: ignore
+    from buissnes_agent.a2a_agent.agent_executor import AnalysisAgentExecutor  # type: ignore
 
 
 load_dotenv()
@@ -293,7 +294,7 @@ def _build_app(
     return app
 
 
-def _build_grpc_server(
+async def _build_grpc_server(
     request_handler: DefaultRequestHandler,
     bind_host: str,
     port: int,
@@ -301,23 +302,28 @@ def _build_grpc_server(
     compat: bool = False,
 ) -> tuple[grpc.aio.Server, int]:
     server = grpc.aio.server()
-    bound_port = server.add_insecure_port(f'{bind_host}:{port}')
-    if bound_port == 0:
-        raise RuntimeError(
-            f'Unable to bind {"compatibility " if compat else ""}gRPC server to {bind_host}:{port}.'
-        )
+    try:
+        bound_port = server.add_insecure_port(f'{bind_host}:{port}')
+        if bound_port == 0:
+            raise RuntimeError(
+                f'Unable to bind {"compatibility " if compat else ""}gRPC server to {bind_host}:{port}.'
+            )
 
-    if compat:
-        compat_servicer = CompatGrpcHandler(request_handler)
-        a2a_v0_3_pb2_grpc.add_A2AServiceServicer_to_server(
-            compat_servicer,
-            server,
-        )
-    else:
-        servicer = GrpcHandler(request_handler)
-        a2a_pb2_grpc.add_A2AServiceServicer_to_server(servicer, server)
+        if compat:
+            compat_servicer = CompatGrpcHandler(request_handler)
+            a2a_v0_3_pb2_grpc.add_A2AServiceServicer_to_server(
+                compat_servicer,
+                server,
+            )
+        else:
+            servicer = GrpcHandler(request_handler)
+            a2a_pb2_grpc.add_A2AServiceServicer_to_server(servicer, server)
 
-    return server, bound_port
+        return server, bound_port
+    except Exception:
+        with contextlib.suppress(Exception):
+            await server.stop(0)
+        raise
 
 
 async def serve(
@@ -341,39 +347,38 @@ async def serve(
     grpc_server = None
     compat_grpc_server = None
 
-    if grpc_port:
-        grpc_server, grpc_port = _build_grpc_server(
-            request_handler=request_handler,
-            bind_host=host,
-            port=grpc_port,
-            compat=False,
-        )
-        await grpc_server.start()
-
-    if compat_grpc_port:
-        compat_grpc_server, compat_grpc_port = _build_grpc_server(
-            request_handler=request_handler,
-            bind_host=host,
-            port=compat_grpc_port,
-            compat=True,
-        )
-        await compat_grpc_server.start()
-
-    logger.info('Starting Deep Research Agent')
-    logger.info(' - Agent card: http://%s:%s%s', public_host, http_port, AGENT_CARD_WELL_KNOWN_PATH)
-    logger.info(' - JSON-RPC:   http://%s:%s/a2a/jsonrpc', public_host, http_port)
-    logger.info(' - REST:       http://%s:%s/a2a/rest', public_host, http_port)
-    logger.info(' - Swagger UI: http://%s:%s/docs', public_host, http_port)
-    if grpc_port:
-        logger.info(' - gRPC 1.0:   %s:%s', public_host, grpc_port)
-    if compat_grpc_port:
-        logger.info(' - gRPC 0.3:   %s:%s', public_host, compat_grpc_port)
-
-    uvicorn_server = uvicorn.Server(
-        uvicorn.Config(app, host=host, port=http_port)
-    )
-
     try:
+        if grpc_port:
+            grpc_server, grpc_port = await _build_grpc_server(
+                request_handler=request_handler,
+                bind_host=host,
+                port=grpc_port,
+                compat=False,
+            )
+            await grpc_server.start()
+
+        if compat_grpc_port:
+            compat_grpc_server, compat_grpc_port = await _build_grpc_server(
+                request_handler=request_handler,
+                bind_host=host,
+                port=compat_grpc_port,
+                compat=True,
+            )
+            await compat_grpc_server.start()
+
+        logger.info('Starting Deep Research Agent')
+        logger.info(' - Agent card: http://%s:%s%s', public_host, http_port, AGENT_CARD_WELL_KNOWN_PATH)
+        logger.info(' - JSON-RPC:   http://%s:%s/a2a/jsonrpc', public_host, http_port)
+        logger.info(' - REST:       http://%s:%s/a2a/rest', public_host, http_port)
+        logger.info(' - Swagger UI: http://%s:%s/docs', public_host, http_port)
+        if grpc_port:
+            logger.info(' - gRPC 1.0:   %s:%s', public_host, grpc_port)
+        if compat_grpc_port:
+            logger.info(' - gRPC 0.3:   %s:%s', public_host, compat_grpc_port)
+
+        uvicorn_server = uvicorn.Server(
+            uvicorn.Config(app, host=host, port=http_port)
+        )
         await uvicorn_server.serve()
     finally:
         if grpc_server is not None:
