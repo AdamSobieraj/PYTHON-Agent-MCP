@@ -26,6 +26,12 @@ class AnalysisAgentExecutor(AgentExecutor):
     def __init__(self) -> None:
         self.agent = AnalysisAgent()
 
+    async def startup(self) -> None:
+        await self.agent.start_auto_refresh()
+
+    async def shutdown(self) -> None:
+        await self.agent.close()
+
     async def execute(
         self,
         context: RequestContext,

@@ -175,6 +175,10 @@ class AnalysisAgent:
         self._stale_toolsets = []
         self._active_streams = 0
         self._init_lock = asyncio.Lock()
+        self._sync_http_client = httpx.Client(verify=SSL_VERIFY)
+        self._async_http_client = httpx.AsyncClient(verify=SSL_VERIFY)
+        self._refresh_task = None
+        self._refresh_stop_event = None
 
     async def initialize(self):
         async with self._init_lock:
@@ -185,6 +189,10 @@ class AnalysisAgent:
             )
             if self.graph is not None and self.config_fingerprint == config_fingerprint:
                 return
+            if self.graph is None:
+                logger.info("Initializing agent settings.")
+            else:
+                logger.info("Detected updated agent settings. Applying hot reload.")
 
             new_toolsets = []
             try:
@@ -325,8 +333,6 @@ class AnalysisAgent:
         return filtered_tools
 
     def _create_model(self, runtime_config: AgentRuntimeConfig) -> ChatOpenAI:
-        sync_client = httpx.Client(verify=SSL_VERIFY)
-        async_client = httpx.AsyncClient(verify=SSL_VERIFY)
         default_headers = self._load_default_headers()
         return ChatOpenAI(
             model=os.getenv('CHAT_MODEL'),
@@ -335,8 +341,8 @@ class AnalysisAgent:
             temperature=float(runtime_config.temperature),
             tiktoken_model_name=None,
             default_headers=default_headers,
-            http_client=sync_client,
-            http_async_client=async_client,
+            http_client=self._sync_http_client,
+            http_async_client=self._async_http_client,
         )
 
     def _load_default_headers(self) -> dict[str, Any]:
@@ -387,6 +393,93 @@ class AnalysisAgent:
                 await toolset.close()
             except Exception:
                 logger.exception("Failed to close an MCP toolset cleanly")
+
+    def get_refresh_interval_seconds(self) -> float:
+        raw_value = os.getenv('AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS', '30')
+        try:
+            interval_seconds = float(raw_value)
+        except ValueError:
+            logger.warning(
+                "AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS=%r is invalid. Falling back to 30 seconds.",
+                raw_value,
+            )
+            return 30.0
+
+        if interval_seconds < 0:
+            logger.warning(
+                "AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS=%s is negative. Disabling automatic refresh.",
+                raw_value,
+            )
+            return 0.0
+
+        return interval_seconds
+
+    async def start_auto_refresh(
+        self,
+        interval_seconds: float | None = None,
+    ) -> None:
+        if interval_seconds is None:
+            interval_seconds = self.get_refresh_interval_seconds()
+
+        await self.initialize()
+
+        if interval_seconds <= 0:
+            logger.info("Automatic agent settings refresh is disabled.")
+            return
+
+        if self._refresh_task is not None and not self._refresh_task.done():
+            return
+
+        self._refresh_stop_event = asyncio.Event()
+        self._refresh_task = asyncio.create_task(
+            self._auto_refresh_loop(interval_seconds),
+            name='analysis-agent-settings-refresh',
+        )
+        logger.info(
+            "Automatic agent settings refresh is enabled every %s seconds.",
+            format(interval_seconds, 'g'),
+        )
+
+    async def stop_auto_refresh(self) -> None:
+        if self._refresh_stop_event is not None:
+            self._refresh_stop_event.set()
+
+        if self._refresh_task is not None:
+            try:
+                await self._refresh_task
+            except asyncio.CancelledError:
+                pass
+
+        self._refresh_task = None
+        self._refresh_stop_event = None
+
+    async def _auto_refresh_loop(self, interval_seconds: float) -> None:
+        assert self._refresh_stop_event is not None
+        stop_event = self._refresh_stop_event
+
+        while True:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+                return
+            except asyncio.TimeoutError:
+                pass
+
+            try:
+                await self.initialize()
+            except Exception:
+                logger.exception("Automatic agent settings refresh failed.")
+
+    async def close(self) -> None:
+        await self.stop_auto_refresh()
+        await self._close_toolsets(list(self.toolsets))
+        self.toolsets = []
+        await self._close_toolsets(list(self._stale_toolsets))
+        self._stale_toolsets = []
+        await self._async_http_client.aclose()
+        self._sync_http_client.close()
+        self.graph = None
+        self.model = None
+        self.tools = []
 
     async def stream(self, query, context_id) -> AsyncIterable[dict[str, Any]]:
         self._active_streams += 1
