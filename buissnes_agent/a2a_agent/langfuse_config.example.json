@@ -1,0 +1,31 @@
+{
+  "temperature": 0,
+  "mcp_servers": [
+    {
+      "name": "knowledge_base",
+      "transport": "streamable_http",
+      "url": "http://localhost:8011/mcp"
+    },
+    {
+      "name": "atlassian",
+      "transport": "streamable_http",
+      "url": "http://localhost:9002/mcp/",
+      // "blocked_tools OR allowed_tools": [
+        "confluence_update_page",
+        "confluence_delete_page",
+        "confluence_delete_attachment"
+      ]
+      
+    },
+    {
+      "name": "curated_docs",
+      "transport": "streamable_http",
+      "url": "http://localhost:9010/mcp",
+      "allowed_tools": [
+        "search_docs",
+        "get_doc"
+      ],
+      "tool_name_prefix": "docs"
+    }
+  ]
+}
