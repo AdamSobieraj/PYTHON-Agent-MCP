@@ -1,13 +1,15 @@
-import sys
 import logging
+import sys
+
 from dotenv import load_dotenv
 
 from metrics import get_repository
 
+
 logging.basicConfig(
     level=logging.INFO,
-    format='[%(levelname)s] %(message)s',
-    stream=sys.stderr
+    format="[%(levelname)s] %(message)s",
+    stream=sys.stderr,
 )
 
 logger = logging.getLogger(__name__)
@@ -15,54 +17,52 @@ load_dotenv()
 
 
 def main():
-    """Inicjalizacja bazy danych metryk (niezależnie od typu!)"""
+    """Initialize the RAG metrics storage."""
 
     print("=" * 70)
     print("         INICJALIZACJA BAZY DANYCH METRYK RAG")
     print("=" * 70)
 
+    repository = None
     try:
-        # Factory automatycznie wybierze typ z ENV
         repository = get_repository()
 
         print(f"\n[INFO] Typ storage: {repository.__class__.__name__}")
 
-        # Krok 1: Test połączenia
-        print("\n[1/2] Testowanie połączenia...")
+        print("\n[1/2] Testowanie polaczenia...")
         if not repository.test_connection():
-            print("\n[ERROR] Nie można połączyć się z storage.")
-            print("Sprawdź konfigurację w .env")
+            print("\n[ERROR] Nie mozna polaczyc sie z storage.")
+            print("Sprawdz konfiguracje w .env")
             sys.exit(1)
 
-        print("[OK] Połączenie działa")
+        print("[OK] Polaczenie dziala")
 
-        # Krok 2: Inicjalizacja schematu
         print("\n[2/2] Inicjalizacja schematu...")
         if not repository.initialize_schema():
-            print("\n[ERROR] Nie można zainicjalizować schematu.")
+            print("\n[ERROR] Nie mozna zainicjalizowac schematu.")
             sys.exit(1)
 
         print("[OK] Schemat zainicjalizowany")
 
-        # Podsumowanie
         print("\n" + "=" * 70)
-        print("         INICJALIZACJA ZAKOŃCZONA POMYŚLNIE")
+        print("         INICJALIZACJA ZAKONCZONA POMYSLNIE")
         print("=" * 70)
-        print("\nMożesz teraz uruchomić:")
-        print("  python MCPServer.py")
+        print("\nMozesz teraz uruchomic:")
+        print("  python -m buissnes_agent.mcp_server")
+        print("  # albo kompatybilnie: python buissnes_agent/MCPServer.py")
         print("\nAnaliza metryk:")
         print("  python test_view_metrics_analyzer.py")
         print("=" * 70)
 
-    except Exception as e:
-        print(f"\n[ERROR] Błąd inicjalizacji: {e}", file=sys.stderr)
+    except Exception as exc:
+        print(f"\n[ERROR] Blad inicjalizacji: {exc}", file=sys.stderr)
         sys.exit(1)
     finally:
-        # Cleanup
-        try:
-            repository.close()
-        except:
-            pass
+        if repository is not None:
+            try:
+                repository.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

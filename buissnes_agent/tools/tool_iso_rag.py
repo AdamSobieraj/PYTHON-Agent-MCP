@@ -9,11 +9,18 @@ from dotenv import load_dotenv
 from buissnes_agent.EmbeddingClient import LocalEmbeddingClient
 
 # ===== METRYKI: IMPORT =====
-from tools.rag_metrics import (
-    RetrievalMetrics,
-    MetricsCalculator,
-    metrics_collector
-)
+try:
+    from buissnes_agent.tools.rag_metrics import (
+        MetricsCalculator,
+        RetrievalMetrics,
+        metrics_collector,
+    )
+except ImportError:
+    from tools.rag_metrics import (  # type: ignore
+        MetricsCalculator,
+        RetrievalMetrics,
+        metrics_collector,
+    )
 # ===========================
 
 logger = logging.getLogger(__name__)
