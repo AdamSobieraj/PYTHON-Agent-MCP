@@ -1,9 +1,9 @@
 import os
 import logging
+from importlib import import_module
 from typing import Optional
 
 from .repository_interface import IMetricsRepository
-from .repository_postgres import PostgresMetricsRepository
 from .repository_file import FileMetricsRepository
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,14 @@ class MetricsRepositoryFactory:
     """
 
     _instance: Optional[IMetricsRepository] = None
+
+    @staticmethod
+    def _load_postgres_repository_class():
+        try:
+            module = import_module("buissnes_agent.metrics.repository_postgres")
+        except ImportError:
+            module = import_module(".repository_postgres", package=__package__)
+        return module.PostgresMetricsRepository
 
     @classmethod
     def create(
@@ -46,7 +54,8 @@ class MetricsRepositoryFactory:
         logger.info(f"Tworzenie metrics repository: type={storage_type}")
 
         if storage_type == "postgres":
-            return PostgresMetricsRepository()
+            postgres_repository_class = cls._load_postgres_repository_class()
+            return postgres_repository_class()
 
         elif storage_type == "file":
             file_path = kwargs.get("file_path") or os.getenv(

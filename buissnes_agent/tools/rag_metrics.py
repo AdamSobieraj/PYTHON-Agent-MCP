@@ -4,12 +4,20 @@ import time
 from datetime import datetime
 from typing import Optional, List
 
-from metrics import (
-    RetrievalMetrics,
-    FullRAGMetrics,
-    get_repository,
-    IMetricsRepository
-)
+try:
+    from buissnes_agent.metrics import (
+        FullRAGMetrics,
+        IMetricsRepository,
+        RetrievalMetrics,
+        get_repository,
+    )
+except ImportError:
+    from metrics import (  # type: ignore
+        FullRAGMetrics,
+        IMetricsRepository,
+        RetrievalMetrics,
+        get_repository,
+    )
 
 logger = logging.getLogger(__name__)
 
