@@ -59,7 +59,7 @@ services:
     <<: *runtime-service
     depends_on:
       agent-mcp:
-        condition: service_started
+        condition: service_healthy
     environment:
       <<: *runtime-env
       INTERNAL_MCP_URL: ${INTERNAL_MCP_URL_CONTAINER:-http://agent-mcp:9000/mcp}
