@@ -229,6 +229,10 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             'TASK_STATE_COMPLETED',
         )
         self.assertEqual(
+            payload['task']['status']['message']['parts'][0]['text'],
+            'Hello from the completed task.',
+        )
+        self.assertEqual(
             payload['task']['artifacts'][0]['parts'][0]['text'],
             'Hello from the completed task.',
         )
@@ -328,8 +332,41 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             'TASK_STATE_COMPLETED',
         )
         self.assertEqual(
+            response.task.status.message.parts[0].text,
+            'Hello from gRPC.',
+        )
+        self.assertEqual(
             response.task.artifacts[0].parts[0].text,
             'Hello from gRPC.',
+        )
+
+    async def test_rest_completed_task_can_publish_distinct_status_summary(
+        self,
+    ) -> None:
+        stream_items = [
+            {
+                'task_state': 'completed',
+                'content': 'Detailed answer artifact.',
+                'status_message': 'Short completion summary.',
+            }
+        ]
+
+        async with self._test_client(stream_items) as client:
+            response = await client.post(
+                '/a2a/rest/message:send',
+                json=self._send_message_payload('summarize the result'),
+                headers={'A2A-Version': '1.0'},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            payload['task']['status']['message']['parts'][0]['text'],
+            'Short completion summary.',
+        )
+        self.assertEqual(
+            payload['task']['artifacts'][0]['parts'][0]['text'],
+            'Detailed answer artifact.',
         )
 
     async def test_app_lifecycle_starts_and_stops_agent_refresh(self) -> None:
@@ -436,8 +473,45 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[4]['content'], 'Drafting the final response...')
         self.assertEqual(items[-1]['task_state'], 'completed')
         self.assertEqual(items[-1]['content'], 'Final answer draft')
+        self.assertEqual(items[-1]['status_message'], 'Final answer draft')
         self.assertEqual(agent.graph.stream_mode, ['updates', 'custom'])
         self.assertEqual(agent.graph.version, 'v2')
+
+    async def test_get_agent_response_separates_artifact_from_status_message(
+        self,
+    ) -> None:
+        agent = AnalysisAgent()
+        agent.graph = SimpleNamespace(
+            aget_state=AsyncMock(
+                return_value=SimpleNamespace(
+                    values={
+                        'messages': [
+                            AIMessage(
+                                content='Detailed final answer with supporting context.'
+                            )
+                        ],
+                        'structured_response': ResponseFormat(
+                            status='completed',
+                            message='Short completion summary.',
+                        ),
+                    }
+                )
+            )
+        )
+        agent._langfuse_initialized = True
+        agent.langfuse_enabled = False
+
+        response = await agent.get_agent_response({'configurable': {}})
+
+        self.assertEqual(response['task_state'], 'completed')
+        self.assertEqual(
+            response['content'],
+            'Detailed final answer with supporting context.',
+        )
+        self.assertEqual(
+            response['status_message'],
+            'Short completion summary.',
+        )
 
     def test_build_langfuse_request_uses_a2a_identifiers(self) -> None:
         executor = AnalysisAgentExecutor()
