@@ -9,6 +9,10 @@ from collections.abc import Callable
 
 from fastmcp import FastMCP
 
+from buissnes_agent.mcp_server.s3_documents import (
+    fetch_markdown_document,
+    fetch_markdown_document_range,
+)
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -16,6 +20,8 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 DEFAULT_MCP_SERVER_NAME = "Knowledge Base RAG Service"
 GENERIC_RAG_TOOL_DESCRIPTION_ENV_VAR = "KNOWLEDGE_BASE_RAG_TOOL_DESCRIPTION"
+S3_DOCUMENT_TOOL_DESCRIPTION_ENV_VAR = "S3_DOCUMENT_TOOL_DESCRIPTION"
+S3_DOCUMENT_RANGE_TOOL_DESCRIPTION_ENV_VAR = "S3_DOCUMENT_RANGE_TOOL_DESCRIPTION"
 DEFAULT_GENERIC_RAG_TOOL_DESCRIPTION = (
     "Retrieve relevant chunks from a Qdrant knowledge-base collection for a "
     "simple RAG workflow. Provide the user's query and the target "
@@ -24,6 +30,18 @@ DEFAULT_GENERIC_RAG_TOOL_DESCRIPTION = (
     "supporting passages with metadata. The tool does not answer the question "
     "for you; it returns retrieved chunks and metadata so you can decide what "
     "to do next."
+)
+DEFAULT_S3_DOCUMENT_TOOL_DESCRIPTION = (
+    "Fetch the full Markdown or text document stored in S3 or MinIO. Provide "
+    "the exact s3_uri from retrieved metadata, for example "
+    "s3://bucket/path/to/file.md. Use this when you need the full source "
+    "document behind a retrieved chunk."
+)
+DEFAULT_S3_DOCUMENT_RANGE_TOOL_DESCRIPTION = (
+    "Fetch only part of a Markdown or text document from S3 or MinIO using an "
+    "S3 byte-range request. Provide start_byte, optionally end_byte, and the "
+    "exact s3_uri. Use this when you want a larger surrounding excerpt "
+    "without downloading the whole object."
 )
 
 RunGenericRag = Callable[[str, str, int | None], str]
@@ -44,6 +62,30 @@ def resolve_generic_rag_tool_description() -> str:
     if description:
         return description
     return DEFAULT_GENERIC_RAG_TOOL_DESCRIPTION
+
+
+def _resolve_tool_description(
+    env_var_name: str,
+    default_description: str,
+) -> str:
+    description = os.getenv(env_var_name, "").strip()
+    if description:
+        return description
+    return default_description
+
+
+def resolve_s3_document_tool_description() -> str:
+    return _resolve_tool_description(
+        S3_DOCUMENT_TOOL_DESCRIPTION_ENV_VAR,
+        DEFAULT_S3_DOCUMENT_TOOL_DESCRIPTION,
+    )
+
+
+def resolve_s3_document_range_tool_description() -> str:
+    return _resolve_tool_description(
+        S3_DOCUMENT_RANGE_TOOL_DESCRIPTION_ENV_VAR,
+        DEFAULT_S3_DOCUMENT_RANGE_TOOL_DESCRIPTION,
+    )
 
 
 def _normalize_collection_name(collection_name: str) -> str:
@@ -89,6 +131,32 @@ def create_mcp_server(
             collection_name,
             top_k,
             run_rag=run_rag,
+        )
+
+    @mcp.tool(description=resolve_s3_document_tool_description())
+    async def get_s3_markdown_document(
+        s3_uri: str,
+    ) -> str:
+        """Load the full text document stored in S3-compatible object storage."""
+
+        return await asyncio.to_thread(
+            fetch_markdown_document,
+            s3_uri=s3_uri,
+        )
+
+    @mcp.tool(description=resolve_s3_document_range_tool_description())
+    async def get_s3_markdown_document_range(
+        s3_uri: str,
+        start_byte: int,
+        end_byte: int | None = None,
+    ) -> str:
+        """Load part of a text document using an S3 byte-range request."""
+
+        return await asyncio.to_thread(
+            fetch_markdown_document_range,
+            start_byte=start_byte,
+            end_byte=end_byte,
+            s3_uri=s3_uri,
         )
 
     return mcp

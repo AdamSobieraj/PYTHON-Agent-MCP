@@ -1,10 +1,25 @@
-import os
-import boto3
 import logging
+import os
+from dataclasses import dataclass
 from typing import Generator
+
+import boto3
+from dotenv import load_dotenv
+
 from buissnes_agent.config_loader import settings
 
 logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+
+@dataclass(frozen=True, slots=True)
+class S3TextObject:
+    text: str
+    content_length: int | None = None
+    content_range: str | None = None
+    etag: str | None = None
+
 
 class DataLoaderS3Service:
     def __init__(self):
@@ -63,16 +78,78 @@ class DataLoaderS3Service:
             logger.error(f"S3Service Error listing objects: {e}")
             raise e
 
-    def download_text(self, bucket_name: str, object_key: str) -> str:
+    def _decode_text(self, data: bytes, *, allow_replacement: bool = False) -> str:
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            if allow_replacement:
+                return data.decode("utf-8", errors="replace")
+
+            return data.decode("windows-1252")
+    @staticmethod
+    def _normalize_etag(etag: str | None) -> str | None:
+        if not etag:
+            return None
+        return etag.strip('"')
+
+    def download_text_response(
+        self,
+        bucket_name: str,
+        object_key: str,
+    ) -> S3TextObject:
         try:
             response = self.s3_client.get_object(Bucket=bucket_name, Key=object_key)
             data = response["Body"].read()
-            try:
-                return data.decode("utf-8")
-            except UnicodeDecodeError:
-                return data.decode("windows-1252")
+            return S3TextObject(
+                text=self._decode_text(data),
+                content_length=response.get("ContentLength"),
+                etag=self._normalize_etag(response.get("ETag")),
+            )
         except Exception as e:
             logger.error(f"S3Service Error downloading {object_key}: {e}")
+            raise e
+
+    def download_text(self, bucket_name: str, object_key: str) -> str:
+        return self.download_text_response(bucket_name, object_key).text
+
+    def download_text_range(
+        self,
+        bucket_name: str,
+        object_key: str,
+        start_byte: int,
+        end_byte: int | None = None,
+    ) -> S3TextObject:
+        if start_byte < 0:
+            raise ValueError("start_byte must be zero or greater.")
+        if end_byte is not None and end_byte < start_byte:
+            raise ValueError("end_byte must be greater than or equal to start_byte.")
+
+        range_header = (
+            f"bytes={start_byte}-"
+            if end_byte is None
+            else f"bytes={start_byte}-{end_byte}"
+        )
+
+        try:
+            response = self.s3_client.get_object(
+                Bucket=bucket_name,
+                Key=object_key,
+                Range=range_header,
+            )
+            data = response["Body"].read()
+            return S3TextObject(
+                text=self._decode_text(data, allow_replacement=True),
+                content_length=response.get("ContentLength"),
+                content_range=response.get("ContentRange"),
+                etag=self._normalize_etag(response.get("ETag")),
+            )
+        except Exception as e:
+            logger.error(
+                "S3Service Error downloading %s with range %s: %s",
+                object_key,
+                range_header,
+                e,
+            )
             raise e
 
     def download_bytes(self, bucket_name: str, key: str) -> bytes:
