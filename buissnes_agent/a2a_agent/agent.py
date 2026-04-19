@@ -3,15 +3,13 @@ import json
 import logging
 import os
 
+from collections import Counter
 from collections.abc import AsyncIterable
 from typing import Any, Literal, TypedDict
 
 import httpx
-from google.adk.tools.mcp_tool.mcp_session_manager import (
-    StreamableHTTPServerParams,
-)
 from google.adk.tools.mcp_tool.mcp_tool import McpTool
-from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
+from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
@@ -22,22 +20,34 @@ from pydantic import BaseModel, Field, create_model
 
 try:
     from . import patch_pydantic  # noqa: F401
+    from .mcp_config import (
+        AgentRuntimeConfig,
+        McpServerConfig,
+        expand_env_vars,
+        matches_tool_filters,
+        resolve_mcp_servers,
+    )
 except ImportError:
     from buissnes_agent.a2a_agent import patch_pydantic  # type: ignore  # noqa: F401
+    from buissnes_agent.a2a_agent.mcp_config import (  # type: ignore
+        AgentRuntimeConfig,
+        McpServerConfig,
+        expand_env_vars,
+        matches_tool_filters,
+        resolve_mcp_servers,
+    )
+
 
 logger = logging.getLogger(__name__)
 memory = MemorySaver()
 
 AGENT_SETTINGS = os.getenv('AGENT_SETTINGS', 'Analyst agent')
 SSL_VERIFY = os.getenv('SSL_VERIFY', 'False').lower() in ('true', '1', 't')
-INTERNAL_MCP_URL = os.getenv('INTERNAL_MCP_URL', 'http://localhost:8011/mcp')
-ATLASSIAN_MCP_URL = os.getenv(
-    'ATLASSIAN_MCP_URL', 'http://localhost:9002/mcp/'
-)
 
 MAX_STATUS_TEXT_LENGTH = 280
 MAX_TOOL_ARG_PREVIEW_LENGTH = 220
 MAX_TOOL_RESULT_PREVIEW_LENGTH = 200
+
 
 class AgentStreamItem(TypedDict, total=False):
     content: str
@@ -197,7 +207,9 @@ class McpToolWrapper(BaseTool):
         writer(payload)
 
     async def _arun(self, *args: Any, **kwargs: Any) -> Any:
-        clean_kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        clean_kwargs = {
+            key: value for key, value in kwargs.items() if value is not None
+        }
         self._emit_tool_event(
             {
                 'event': 'tool_started',
@@ -241,7 +253,7 @@ class McpToolWrapper(BaseTool):
 
 
 class AnalysisAgent:
-    """Analysis Agent - a specialized assistant for system analysis tasks."""
+    """Analysis Agent for system analysis and research tasks."""
 
     FORMAT_INSTRUCTION = (
         'Set response status to input_required if the user needs to provide more '
@@ -256,11 +268,21 @@ class AnalysisAgent:
         self.model: ChatOpenAI | None = None
         self.tools: list[BaseTool] = []
         self.graph = None
-        self._initialization_lock = asyncio.Lock()
+        self.runtime_config: AgentRuntimeConfig | None = None
+        self.config_fingerprint: str | None = None
+        self.toolsets: list[McpToolset] = []
+        self._stale_toolsets: list[McpToolset] = []
+        self._active_streams = 0
+        self._init_lock = asyncio.Lock()
+        self._sync_http_client = httpx.Client(verify=SSL_VERIFY)
+        self._async_http_client = httpx.AsyncClient(verify=SSL_VERIFY)
+        self._refresh_task: asyncio.Task[None] | None = None
+        self._refresh_stop_event: asyncio.Event | None = None
         self._langfuse_initialized = False
         self.langfuse_enabled = False
         self.langfuse = None
         self.langfuse_handler = None
+        self._last_prompt_source = 'local_default'
 
     def _initialize_langfuse(self) -> None:
         if self._langfuse_initialized:
@@ -312,8 +334,12 @@ class AnalysisAgent:
             'failed',
         ] = 'working',
         metadata: dict[str, Any] | None = None,
+        truncate_content: bool = True,
     ) -> AgentStreamItem:
-        message = _truncate_text(content, limit=MAX_STATUS_TEXT_LENGTH)
+        if truncate_content:
+            message = _truncate_text(content, limit=MAX_STATUS_TEXT_LENGTH)
+        else:
+            message = content
         normalized_metadata = dict(metadata or {})
         return {
             'content': message,
@@ -323,175 +349,393 @@ class AnalysisAgent:
             'metadata': normalized_metadata,
         }
 
-    async def _load_toolset(
-        self,
-        *,
-        name: str,
-        url: str,
-    ) -> list[BaseTool]:
-        logger.info('Connecting to %s MCP at %s', name, url)
-        connection_params = StreamableHTTPServerParams(url=url)
-        raw_tools = await MCPToolset(
-            connection_params=connection_params
-        ).get_tools()
-        logger.info('Loaded %s tools from %s MCP', len(raw_tools), name)
-        return [McpToolWrapper(tool) for tool in raw_tools]
-
-    async def initialize(self) -> AsyncIterable[AgentStreamItem]:
-        if self.graph is not None:
-            return
-
-        async with self._initialization_lock:
-            if self.graph is not None:
-                return
-
-            self.tools = []
-            yield self._stream_item(
-                'Initializing agent runtime...',
-                metadata={'phase': 'initializing'},
-            )
-
-            yield self._stream_item(
-                'Connecting to the Knowledge Base tools...',
-                metadata={'phase': 'initializing', 'tool_source': 'knowledge_base'},
-            )
+    def _load_runtime_config(self) -> AgentRuntimeConfig:
+        self._initialize_langfuse()
+        if self.langfuse_enabled and self.langfuse is not None:
             try:
-                self.tools.extend(
-                    await self._load_toolset(
-                        name='Knowledge Base',
-                        url=INTERNAL_MCP_URL,
+                prompt = self.langfuse.get_prompt(AGENT_SETTINGS, label='latest')
+                self._last_prompt_source = 'langfuse'
+                return AgentRuntimeConfig(
+                    prompt=expand_env_vars(prompt.prompt),
+                    config=expand_env_vars(prompt.config or {}),
+                )
+            except Exception:
+                if self.runtime_config is not None:
+                    logger.exception(
+                        "Failed to load Langfuse prompt '%s'. Reusing the last applied configuration.",
+                        AGENT_SETTINGS,
+                    )
+                    return self.runtime_config
+                logger.exception(
+                    "Failed to load Langfuse prompt '%s'. Falling back to local config.",
+                    AGENT_SETTINGS,
+                )
+
+        with open(
+            os.path.join(os.path.dirname(__file__), 'default_config.json'),
+            encoding='utf-8',
+        ) as config_file:
+            agent_config = json.load(config_file)
+
+        self._last_prompt_source = 'local_default'
+        return AgentRuntimeConfig(
+            prompt=expand_env_vars(agent_config['prompt']),
+            config=expand_env_vars(agent_config.get('config') or {}),
+        )
+
+    async def _load_server_tools(
+        self,
+        server_config: McpServerConfig,
+    ) -> tuple[McpToolset, list[McpTool], list[BaseTool]]:
+        toolset = McpToolset(
+            connection_params=server_config.build_connection_params(),
+            tool_name_prefix=server_config.tool_name_prefix,
+        )
+        raw_tools = await toolset.get_tools()
+        filtered_tools = self._filter_tools(raw_tools, server_config)
+        wrapped_tools = [McpToolWrapper(tool) for tool in filtered_tools]
+        return toolset, raw_tools, wrapped_tools
+
+    async def initialize(self) -> list[AgentStreamItem]:
+        async with self._init_lock:
+            if self.graph is not None and self.config_fingerprint is None:
+                return []
+
+            runtime_config = self._load_runtime_config()
+            config_fingerprint = json.dumps(
+                runtime_config.model_dump(mode='json', exclude_none=True),
+                sort_keys=True,
+            )
+            if (
+                self.graph is not None
+                and self.config_fingerprint == config_fingerprint
+            ):
+                return []
+
+            events: list[AgentStreamItem] = []
+            if self.graph is None:
+                events.append(
+                    self._stream_item(
+                        'Initializing agent runtime...',
+                        metadata={'phase': 'initializing'},
                     )
                 )
-                yield self._stream_item(
-                    f'Knowledge Base tools ready ({len(self.tools)} total tools loaded so far).',
+            else:
+                events.append(
+                    self._stream_item(
+                        'Detected updated settings. Applying hot reload...',
+                        metadata={'phase': 'reloading'},
+                    )
+                )
+
+            new_toolsets: list[McpToolset] = []
+            new_tools: list[BaseTool] = []
+            try:
+                for server_config in resolve_mcp_servers(runtime_config):
+                    server_name = server_config.resolved_name()
+                    events.append(
+                        self._stream_item(
+                            f"Connecting to {server_name} tools...",
+                            metadata={
+                                'phase': 'initializing',
+                                'tool_source': server_name,
+                            },
+                        )
+                    )
+                    try:
+                        toolset, raw_tools, wrapped_tools = (
+                            await self._load_server_tools(server_config)
+                        )
+                        if not wrapped_tools:
+                            await toolset.close()
+                            events.append(
+                                self._stream_item(
+                                    (
+                                        f'{server_name} exposed no usable tools after '
+                                        'applying filters.'
+                                    ),
+                                    metadata={
+                                        'phase': 'initializing',
+                                        'severity': 'warning',
+                                        'tool_source': server_name,
+                                        'raw_tool_count': len(raw_tools),
+                                    },
+                                )
+                            )
+                            continue
+
+                        new_toolsets.append(toolset)
+                        new_tools.extend(wrapped_tools)
+                        events.append(
+                            self._stream_item(
+                                (
+                                    f'{server_name} tools ready '
+                                    f'({len(wrapped_tools)} new tools, {len(new_tools)} total).'
+                                ),
+                                metadata={
+                                    'phase': 'initializing',
+                                    'tool_source': server_name,
+                                    'tool_count': len(wrapped_tools),
+                                    'raw_tool_count': len(raw_tools),
+                                    'total_tool_count': len(new_tools),
+                                },
+                            )
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "Failed to load tools from MCP server '%s': %s",
+                            server_name,
+                            exc,
+                        )
+                        events.append(
+                            self._stream_item(
+                                (
+                                    f'{server_name} tools are unavailable right now; '
+                                    'continuing with the remaining runtime.'
+                                ),
+                                metadata={
+                                    'phase': 'initializing',
+                                    'severity': 'warning',
+                                    'tool_source': server_name,
+                                    'warning_type': type(exc).__name__,
+                                },
+                            )
+                        )
+
+                new_model = self._create_model(runtime_config)
+                new_graph = create_react_agent(
+                    new_model,
+                    tools=new_tools,
+                    checkpointer=memory,
+                    prompt=runtime_config.prompt,
+                    response_format=(self.FORMAT_INSTRUCTION, ResponseFormat),
+                )
+            except Exception:
+                await self._close_toolsets(new_toolsets)
+                if self.graph is None:
+                    raise
+                logger.exception(
+                    'Failed to refresh agent configuration. Keeping the previous graph.'
+                )
+                events.append(
+                    self._stream_item(
+                        (
+                            'Updated settings could not be applied; continuing '
+                            'with the previous runtime.'
+                        ),
+                        metadata={
+                            'phase': 'reloading',
+                            'severity': 'warning',
+                        },
+                    )
+                )
+                return events
+
+            previous_toolsets = list(self.toolsets)
+            self.runtime_config = runtime_config
+            self.config_fingerprint = config_fingerprint
+            self.model = new_model
+            self.tools = new_tools
+            self.graph = new_graph
+            self.toolsets = new_toolsets
+            self._log_duplicate_tool_names()
+
+            if previous_toolsets:
+                self._stale_toolsets.extend(previous_toolsets)
+
+            await self._maybe_close_stale_toolsets()
+            events.append(
+                self._stream_item(
+                    (
+                        'Agent runtime ready. '
+                        f'Prompt source: {self._last_prompt_source}. '
+                        f'Total tools available: {len(self.tools)}.'
+                    ),
                     metadata={
                         'phase': 'initializing',
-                        'tool_source': 'knowledge_base',
+                        'prompt_source': self._last_prompt_source,
                         'tool_count': len(self.tools),
                     },
                 )
-            except Exception as exc:
-                logger.exception(
-                    'Failed to load tools from Knowledge Base MCP: %s',
-                    exc,
-                )
-                yield self._stream_item(
-                    'Knowledge Base tools are unavailable right now; continuing with the remaining runtime.',
-                    metadata={
-                        'phase': 'initializing',
-                        'severity': 'warning',
-                        'tool_source': 'knowledge_base',
-                        'warning_type': type(exc).__name__,
-                    },
-                )
-
-            yield self._stream_item(
-                'Connecting to the Atlassian tools...',
-                metadata={'phase': 'initializing', 'tool_source': 'atlassian'},
             )
-            try:
-                atlassian_tools = await self._load_toolset(
-                    name='Atlassian',
-                    url=ATLASSIAN_MCP_URL,
-                )
-                self.tools.extend(atlassian_tools)
-                yield self._stream_item(
-                    f'Atlassian tools ready ({len(atlassian_tools)} new tools, {len(self.tools)} total).',
-                    metadata={
-                        'phase': 'initializing',
-                        'tool_source': 'atlassian',
-                        'tool_count': len(atlassian_tools),
-                        'total_tool_count': len(self.tools),
-                    },
-                )
-            except Exception as exc:
-                logger.exception(
-                    'Failed to load tools from Atlassian MCP: %s',
-                    exc,
-                )
-                yield self._stream_item(
-                    'Atlassian tools are unavailable right now; continuing with the remaining runtime.',
-                    metadata={
-                        'phase': 'initializing',
-                        'severity': 'warning',
-                        'tool_source': 'atlassian',
-                        'warning_type': type(exc).__name__,
-                    },
-                )
+            return events
 
-            yield self._stream_item(
-                'Loading agent prompt configuration...',
-                metadata={'phase': 'initializing'},
-            )
-            self._initialize_langfuse()
-            agent_config: dict[str, Any]
-            if self.langfuse_enabled and self.langfuse is not None:
-                try:
-                    prompt = self.langfuse.get_prompt(
-                        AGENT_SETTINGS,
-                        label='latest',
-                    )
-                    agent_config = {
-                        'prompt': prompt.prompt,
-                        'config': {
-                            'temperature': prompt.config.get('temperature', 0),
-                        },
-                    }
-                    prompt_source = 'langfuse'
-                except Exception as exc:
-                    logger.exception(
-                        'Failed to fetch Langfuse prompt. Falling back to local config: %s',
-                        exc,
-                    )
-                    self.langfuse_enabled = False
-                    self.langfuse_handler = None
-                    with open(
-                        os.path.join(
-                            os.path.dirname(__file__),
-                            'default_config.json',
-                        )
-                    ) as config_file:
-                        agent_config = json.load(config_file)
-                    prompt_source = 'local_default'
+    def _filter_tools(
+        self,
+        server_tools: list[McpTool],
+        server_config: McpServerConfig,
+    ) -> list[McpTool]:
+        filtered_tools = []
+        skipped_tool_names = []
+
+        for tool in server_tools:
+            tool_meta = getattr(tool.raw_mcp_tool, 'meta', None)
+            if matches_tool_filters(tool.name, tool_meta, server_config):
+                filtered_tools.append(tool)
             else:
-                with open(
-                    os.path.join(
-                        os.path.dirname(__file__),
-                        'default_config.json',
-                    )
-                ) as config_file:
-                    agent_config = json.load(config_file)
-                prompt_source = 'local_default'
+                skipped_tool_names.append(tool.name)
 
-            sync_client = httpx.Client(verify=SSL_VERIFY)
-            async_client = httpx.AsyncClient(verify=SSL_VERIFY)
-
-            self.model = ChatOpenAI(
-                model=os.getenv('CHAT_MODEL'),
-                openai_api_key=os.getenv('CHAT_API_KEY', 'EMPTY'),
-                openai_api_base=os.getenv('CHAT_BASE_URL'),
-                temperature=float(agent_config['config']['temperature']),
-                tiktoken_model_name=None,
-                default_headers=json.loads(os.getenv('DEFAULT_HEADERS')),
-                http_client=sync_client,
-                http_async_client=async_client,
-            )
-            self.graph = create_react_agent(
-                self.model,
-                tools=self.tools,
-                checkpointer=memory,
-                prompt=agent_config['prompt'],
-                response_format=(self.FORMAT_INSTRUCTION, ResponseFormat),
+        if skipped_tool_names:
+            logger.info(
+                "Filtered out %s tool(s) from MCP server '%s': %s",
+                len(skipped_tool_names),
+                server_config.resolved_name(),
+                ', '.join(sorted(skipped_tool_names)),
             )
 
-            yield self._stream_item(
-                f'Agent runtime ready. Prompt source: {prompt_source}. Total tools available: {len(self.tools)}.',
-                metadata={
-                    'phase': 'initializing',
-                    'prompt_source': prompt_source,
-                    'tool_count': len(self.tools),
-                },
+        return filtered_tools
+
+    def _create_model(self, runtime_config: AgentRuntimeConfig) -> ChatOpenAI:
+        default_headers = self._load_default_headers()
+        return ChatOpenAI(
+            model=os.getenv('CHAT_MODEL'),
+            openai_api_key=os.getenv('CHAT_API_KEY', 'EMPTY'),
+            openai_api_base=os.getenv('CHAT_BASE_URL'),
+            temperature=float(runtime_config.temperature),
+            tiktoken_model_name=None,
+            default_headers=default_headers,
+            http_client=self._sync_http_client,
+            http_async_client=self._async_http_client,
+        )
+
+    def _load_default_headers(self) -> dict[str, Any]:
+        raw_headers = os.getenv('DEFAULT_HEADERS')
+        if not raw_headers:
+            return {}
+
+        try:
+            parsed_headers = json.loads(raw_headers)
+        except json.JSONDecodeError:
+            logger.warning(
+                'DEFAULT_HEADERS is not valid JSON. Ignoring the value.'
             )
+            return {}
+
+        if not isinstance(parsed_headers, dict):
+            logger.warning(
+                'DEFAULT_HEADERS must be a JSON object. Ignoring the value.'
+            )
+            return {}
+
+        return parsed_headers
+
+    def _log_duplicate_tool_names(self) -> None:
+        duplicate_counts = Counter(tool.name for tool in self.tools)
+        duplicates = sorted(
+            tool_name
+            for tool_name, count in duplicate_counts.items()
+            if count > 1
+        )
+        if duplicates:
+            logger.warning(
+                'Duplicate MCP tool names detected: %s. '
+                'Consider setting tool_name_prefix in the Langfuse MCP config.',
+                ', '.join(duplicates),
+            )
+
+    async def _maybe_close_stale_toolsets(self) -> None:
+        if self._active_streams != 0 or not self._stale_toolsets:
+            return
+
+        stale_toolsets = list(self._stale_toolsets)
+        self._stale_toolsets.clear()
+        await self._close_toolsets(stale_toolsets)
+
+    async def _close_toolsets(self, toolsets: list[McpToolset]) -> None:
+        for toolset in toolsets:
+            try:
+                await toolset.close()
+            except Exception:
+                logger.exception('Failed to close an MCP toolset cleanly')
+
+    def get_refresh_interval_seconds(self) -> float:
+        raw_value = os.getenv('AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS', '30')
+        try:
+            interval_seconds = float(raw_value)
+        except ValueError:
+            logger.warning(
+                'AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS=%r is invalid. '
+                'Falling back to 30 seconds.',
+                raw_value,
+            )
+            return 30.0
+
+        if interval_seconds < 0:
+            logger.warning(
+                'AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS=%s is negative. '
+                'Disabling automatic refresh.',
+                raw_value,
+            )
+            return 0.0
+
+        return interval_seconds
+
+    async def start_auto_refresh(
+        self,
+        interval_seconds: float | None = None,
+    ) -> None:
+        if interval_seconds is None:
+            interval_seconds = self.get_refresh_interval_seconds()
+
+        await self.initialize()
+
+        if interval_seconds <= 0:
+            logger.info('Automatic agent settings refresh is disabled.')
+            return
+
+        if self._refresh_task is not None and not self._refresh_task.done():
+            return
+
+        self._refresh_stop_event = asyncio.Event()
+        self._refresh_task = asyncio.create_task(
+            self._auto_refresh_loop(interval_seconds),
+            name='analysis-agent-settings-refresh',
+        )
+        logger.info(
+            'Automatic agent settings refresh is enabled every %s seconds.',
+            format(interval_seconds, 'g'),
+        )
+
+    async def stop_auto_refresh(self) -> None:
+        if self._refresh_stop_event is not None:
+            self._refresh_stop_event.set()
+
+        if self._refresh_task is not None:
+            try:
+                await self._refresh_task
+            except asyncio.CancelledError:
+                pass
+
+        self._refresh_task = None
+        self._refresh_stop_event = None
+
+    async def _auto_refresh_loop(self, interval_seconds: float) -> None:
+        assert self._refresh_stop_event is not None
+        stop_event = self._refresh_stop_event
+
+        while True:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+                return
+            except asyncio.TimeoutError:
+                pass
+
+            try:
+                await self.initialize()
+            except Exception:
+                logger.exception('Automatic agent settings refresh failed.')
+
+    async def close(self) -> None:
+        await self.stop_auto_refresh()
+        await self._close_toolsets(list(self.toolsets))
+        self.toolsets = []
+        await self._close_toolsets(list(self._stale_toolsets))
+        self._stale_toolsets = []
+        await self._async_http_client.aclose()
+        self._sync_http_client.close()
+        self.graph = None
+        self.model = None
+        self.tools = []
 
     def _map_custom_event(
         self,
@@ -663,38 +907,43 @@ class AnalysisAgent:
         query: str,
         context_id: str,
     ) -> AsyncIterable[AgentStreamItem]:
-        async for item in self.initialize():
-            yield item
-
-        if self.graph is None:
-            raise RuntimeError('Agent graph was not initialized.')
-
-        inputs = {'messages': [('user', query)]}
-        config = self._build_graph_config(context_id)
-        seen_message_keys: set[str] = set()
-
-        yield self._stream_item(
-            'Reviewing the request and conversation context...',
-            metadata={'phase': 'planning', 'context_id': context_id},
-        )
-        yield self._stream_item(
-            'Sending the request to the language model...',
-            metadata={'phase': 'model_call', 'context_id': context_id},
-        )
-
-        async for chunk in self.graph.astream(
-            inputs,
-            config,
-            stream_mode=['updates', 'custom'],
-            version='v2',
-        ):
-            for item in self._map_graph_chunk(
-                chunk,
-                seen_message_keys=seen_message_keys,
-            ):
+        self._active_streams += 1
+        try:
+            for item in await self.initialize():
                 yield item
 
-        yield await self.get_agent_response(config)
+            if self.graph is None:
+                raise RuntimeError('Agent graph was not initialized.')
+
+            inputs = {'messages': [('user', query)]}
+            config = self._build_graph_config(context_id)
+            seen_message_keys: set[str] = set()
+
+            yield self._stream_item(
+                'Reviewing the request and conversation context...',
+                metadata={'phase': 'planning', 'context_id': context_id},
+            )
+            yield self._stream_item(
+                'Sending the request to the language model...',
+                metadata={'phase': 'model_call', 'context_id': context_id},
+            )
+
+            async for chunk in self.graph.astream(
+                inputs,
+                config,
+                stream_mode=['updates', 'custom'],
+                version='v2',
+            ):
+                for item in self._map_graph_chunk(
+                    chunk,
+                    seen_message_keys=seen_message_keys,
+                ):
+                    yield item
+
+            yield await self.get_agent_response(config)
+        finally:
+            self._active_streams -= 1
+            await self._maybe_close_stale_toolsets()
 
     async def get_agent_response(
         self,
@@ -753,6 +1002,7 @@ class AnalysisAgent:
                     'phase': 'final_response',
                     'response_status': structured_response.status,
                 },
+                truncate_content=False,
             )
 
         fallback_message = final_content or (
@@ -765,4 +1015,5 @@ class AnalysisAgent:
                 'phase': 'final_response',
                 'response_status': 'fallback',
             },
+            truncate_content=False,
         )

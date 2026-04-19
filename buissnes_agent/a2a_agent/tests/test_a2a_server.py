@@ -3,7 +3,7 @@ import unittest
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import grpc
@@ -28,6 +28,7 @@ from buissnes_agent.a2a_agent.__main__ import (
     _build_request_handler,
 )
 from buissnes_agent.a2a_agent.agent import AnalysisAgent, ResponseFormat
+from buissnes_agent.a2a_agent.agent_executor import AnalysisAgentExecutor
 
 
 class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
@@ -49,23 +50,30 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             for item in stream_items:
                 yield item
 
-        with patch.object(AnalysisAgent, 'stream', new=fake_stream):
+        with (
+            patch.object(AnalysisAgent, 'stream', new=fake_stream),
+            patch.object(AnalysisAgentExecutor, 'startup', new=AsyncMock()),
+            patch.object(AnalysisAgentExecutor, 'shutdown', new=AsyncMock()),
+        ):
             agent_card = _build_agent_card(
                 public_host='testserver',
                 http_port=10000,
                 grpc_port=10001,
                 compat_grpc_port=10002,
             )
-            request_handler = _build_request_handler(agent_card)
-            app = _build_app(agent_card, request_handler)
-            await app.router.startup()
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(
-                transport=transport,
-                base_url='http://testserver',
-            ) as client:
-                yield client
-            await app.router.shutdown()
+            agent_executor = AnalysisAgentExecutor()
+            request_handler = _build_request_handler(
+                agent_card,
+                agent_executor,
+            )
+            app = _build_app(agent_card, request_handler, agent_executor)
+            async with app.router.lifespan_context(app):
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url='http://testserver',
+                ) as client:
+                    yield client
 
     @asynccontextmanager
     async def _grpc_stub(self, stream_items: list[dict[str, Any]]):
@@ -84,7 +92,11 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
                 grpc_port=10001,
                 compat_grpc_port=10002,
             )
-            request_handler = _build_request_handler(agent_card)
+            agent_executor = AnalysisAgentExecutor()
+            request_handler = _build_request_handler(
+                agent_card,
+                agent_executor,
+            )
             grpc_server, port = await _build_grpc_server(
                 request_handler=request_handler,
                 bind_host='127.0.0.1',
@@ -300,6 +312,33 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             'Hello from gRPC.',
         )
 
+    async def test_app_lifecycle_starts_and_stops_agent_refresh(self) -> None:
+        startup_mock = AsyncMock()
+        shutdown_mock = AsyncMock()
+
+        with (
+            patch.object(AnalysisAgentExecutor, 'startup', startup_mock),
+            patch.object(AnalysisAgentExecutor, 'shutdown', shutdown_mock),
+        ):
+            agent_card = _build_agent_card(
+                public_host='testserver',
+                http_port=10000,
+                grpc_port=10001,
+                compat_grpc_port=10002,
+            )
+            agent_executor = AnalysisAgentExecutor()
+            request_handler = _build_request_handler(
+                agent_card,
+                agent_executor,
+            )
+            app = _build_app(agent_card, request_handler, agent_executor)
+
+            async with app.router.lifespan_context(app):
+                pass
+
+        startup_mock.assert_awaited_once()
+        shutdown_mock.assert_awaited_once()
+
     async def test_analysis_agent_stream_emits_status_updates(self) -> None:
         class FakeGraph:
             async def astream(
@@ -362,8 +401,14 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         async for item in agent.stream('How big is the context?', 'ctx-1'):
             items.append(item)
 
-        self.assertEqual(items[0]['content'], 'Reviewing the request and conversation context...')
-        self.assertEqual(items[1]['content'], 'Sending the request to the language model...')
+        self.assertEqual(
+            items[0]['content'],
+            'Reviewing the request and conversation context...',
+        )
+        self.assertEqual(
+            items[1]['content'],
+            'Sending the request to the language model...',
+        )
         self.assertIn('Running tool search_docs.', items[2]['content'])
         self.assertEqual(items[3]['content'], 'Reviewing tool results...')
         self.assertEqual(items[4]['content'], 'Drafting the final response...')

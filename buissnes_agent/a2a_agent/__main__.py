@@ -4,6 +4,8 @@ import logging
 import os
 import sys
 
+from contextlib import asynccontextmanager
+
 import click
 import grpc
 import uvicorn
@@ -178,9 +180,15 @@ def _build_agent_card(
     )
 
 
-def _build_request_handler(agent_card: AgentCard) -> DefaultRequestHandler:
+def _build_request_handler(
+    agent_card: AgentCard,
+    agent_executor: AnalysisAgentExecutor | None = None,
+) -> DefaultRequestHandler:
+    if agent_executor is None:
+        agent_executor = AnalysisAgentExecutor()
+
     return DefaultRequestHandler(
-        agent_executor=AnalysisAgentExecutor(),
+        agent_executor=agent_executor,
         task_store=InMemoryTaskStore(),
         agent_card=agent_card,
     )
@@ -241,11 +249,21 @@ def _add_documented_rest_get_routes(
 def _build_app(
     agent_card: AgentCard,
     request_handler: DefaultRequestHandler,
+    agent_executor: AnalysisAgentExecutor,
 ) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        await agent_executor.startup()
+        try:
+            yield
+        finally:
+            await agent_executor.shutdown()
+
     app = FastAPI(
         title='Deep Research Agent',
         description='A2A server exposing JSON-RPC, HTTP+JSON REST, and gRPC transports.',
         version='1.0.0',
+        lifespan=lifespan,
     )
 
     @app.get(
@@ -341,8 +359,9 @@ async def serve(
         grpc_port=grpc_port,
         compat_grpc_port=compat_grpc_port,
     )
-    request_handler = _build_request_handler(agent_card)
-    app = _build_app(agent_card, request_handler)
+    agent_executor = AnalysisAgentExecutor()
+    request_handler = _build_request_handler(agent_card, agent_executor)
+    app = _build_app(agent_card, request_handler, agent_executor)
 
     grpc_server = None
     compat_grpc_server = None
