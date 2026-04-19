@@ -79,17 +79,13 @@ class DataLoaderS3Service:
             raise e
 
     def _decode_text(self, data: bytes, *, allow_replacement: bool = False) -> str:
-        for encoding in ("utf-8", "windows-1252"):
-            try:
-                return data.decode(encoding)
-            except UnicodeDecodeError:
-                continue
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            if allow_replacement:
+                return data.decode("utf-8", errors="replace")
 
-        if allow_replacement:
-            return data.decode("utf-8", errors="replace")
-
-        return data.decode("windows-1252", errors="replace")
-
+            return data.decode("windows-1252")
     @staticmethod
     def _normalize_etag(etag: str | None) -> str | None:
         if not etag:
