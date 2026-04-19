@@ -13,8 +13,8 @@ ENV CERTINFO=/etc/ssl/certs/ca-certificates.crt
 # Install the project into `/app`
 WORKDIR /app
 
-# Create a non-root user 'app'
-RUN useradd -m -s /bin/sh app
+# Create a non-root user 'app' with fixed UID/GID 1000 to match cache mount ownership
+RUN groupadd -g 1000 app && useradd -m -s /bin/sh -u 1000 -g 1000 app
 
 # Prepare writable directories for the application user.
 RUN mkdir -p /home/app/.cache/uv && chown -R app:app /app /home/app
