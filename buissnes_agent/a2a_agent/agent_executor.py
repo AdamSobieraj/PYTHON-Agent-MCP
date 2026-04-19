@@ -118,7 +118,16 @@ class AnalysisAgentExecutor(AgentExecutor):
                         metadata=metadata,
                         last_chunk=True,
                     )
-                    await updater.complete()
+                    await updater.complete(
+                        message=self._new_agent_message(
+                            updater,
+                            self._resolve_status_message(
+                                item,
+                                fallback_content=content,
+                            ),
+                            metadata=metadata,
+                        )
+                    )
                     return
 
                 if task_state == 'input_required':
@@ -234,6 +243,17 @@ class AnalysisAgentExecutor(AgentExecutor):
         metadata.setdefault('task_id', task_id)
         metadata.setdefault('context_id', context_id)
         return self._json_safe(metadata)
+
+    def _resolve_status_message(
+        self,
+        item: dict[str, Any],
+        *,
+        fallback_content: str,
+    ) -> str:
+        status_message = str(item.get('status_message') or '').strip()
+        if status_message:
+            return status_message
+        return fallback_content
 
     def _json_safe(self, value: Any) -> Any:
         if value is None or isinstance(value, (str, int, float, bool)):

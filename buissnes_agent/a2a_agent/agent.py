@@ -55,6 +55,7 @@ LANGFUSE_TRACE_ID_PATTERN = re.compile(r'^[0-9a-f]{32}$')
 
 class AgentStreamItem(TypedDict, total=False):
     content: str
+    status_message: str
     task_state: Literal['working', 'completed', 'input_required', 'failed']
     is_task_complete: bool
     require_user_input: bool
@@ -403,6 +404,7 @@ class AnalysisAgent:
         self,
         content: str,
         *,
+        status_message: str | None = None,
         task_state: Literal[
             'working',
             'completed',
@@ -417,13 +419,18 @@ class AnalysisAgent:
         else:
             message = content
         normalized_metadata = dict(metadata or {})
-        return {
+        item: AgentStreamItem = {
             'content': message,
             'task_state': task_state,
             'is_task_complete': task_state == 'completed',
             'require_user_input': task_state == 'input_required',
             'metadata': normalized_metadata,
         }
+        if status_message is not None:
+            normalized_status_message = str(status_message).strip()
+            if normalized_status_message:
+                item['status_message'] = normalized_status_message
+        return item
 
     def _load_runtime_config(self) -> AgentRuntimeConfig:
         self._initialize_langfuse()
@@ -1219,15 +1226,6 @@ class AnalysisAgent:
                 )
                 seen_message_keys: set[str] = set()
 
-                yield self._stream_item(
-                    'Reviewing the request and conversation context...',
-                    metadata={'phase': 'planning', 'context_id': context_id},
-                )
-                yield self._stream_item(
-                    'Sending the request to the language model...',
-                    metadata={'phase': 'model_call', 'context_id': context_id},
-                )
-
                 async for chunk in self.graph.astream(
                     inputs,
                     config,
@@ -1286,6 +1284,7 @@ class AnalysisAgent:
 
         structured_response = current_state.values.get('structured_response')
         final_content = last_ai_message
+        final_status_message: str | None = None
         final_state: Literal[
             'working',
             'completed',
@@ -1294,29 +1293,23 @@ class AnalysisAgent:
         ] = 'input_required'
 
         if structured_response and isinstance(structured_response, ResponseFormat):
-            final_content = structured_response.message.strip() or last_ai_message
-            if (
-                last_ai_message
-                and last_ai_message != structured_response.message
-            ):
-                if structured_response.message in last_ai_message:
-                    final_content = last_ai_message
-                elif last_ai_message in structured_response.message:
-                    final_content = structured_response.message
-                else:
-                    final_content = (
-                        f'{last_ai_message}\n\n{structured_response.message}'
-                    )
+            structured_message = structured_response.message.strip()
 
             if structured_response.status == 'completed':
                 final_state = 'completed'
+                final_content = last_ai_message or structured_message
             elif structured_response.status == 'error':
                 final_state = 'failed'
+                final_content = structured_message or last_ai_message
             else:
                 final_state = 'input_required'
+                final_content = structured_message or last_ai_message
+
+            final_status_message = structured_message or final_content
 
             return self._stream_item(
                 final_content or 'The task finished without a response message.',
+                status_message=final_status_message or final_content,
                 task_state=final_state,
                 metadata={
                     'phase': 'final_response',
@@ -1330,6 +1323,7 @@ class AnalysisAgent:
         )
         return self._stream_item(
             fallback_message,
+            status_message=fallback_message,
             task_state='input_required',
             metadata={
                 'phase': 'final_response',
