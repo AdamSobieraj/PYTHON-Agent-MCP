@@ -3,7 +3,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from metrics import get_repository
+from buissnes_agent.metrics import get_repository
 
 
 logging.basicConfig(
