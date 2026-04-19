@@ -1,5 +1,5 @@
 # Use a Python image with uv pre-installed
-FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS uv
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 # Install local CA certificates
 COPY localca.pem /usr/local/share/ca-certificates/localca.crt
 RUN update-ca-certificates
@@ -16,9 +16,8 @@ WORKDIR /app
 # Create a non-root user 'app'
 RUN useradd -m -s /bin/sh app
 
-
-#chown the app directory
-RUN chown -R app:app /app   
+# Prepare writable directories for the application user.
+RUN mkdir -p /home/app/.cache/uv && chown -R app:app /app /home/app
 
 USER app
 
@@ -39,14 +38,14 @@ RUN --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv lock
 
 # Install the project's dependencies using the lockfile
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/home/app/.cache/uv,uid=1000,gid=1000 \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     uv sync --frozen --no-install-project --no-dev --no-editable
 
 # Then, copy the rest of the project source code and install it
 COPY --chown=app:app . /app
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/home/app/.cache/uv,uid=1000,gid=1000 \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     uv sync --frozen --no-dev --no-editable
 
@@ -61,8 +60,8 @@ RUN find /app/.venv -type d -name '__pycache__' -prune -exec rm -rf {} + || true
 
 # set path to the virtual environment
 ENV PATH="/app/.venv/bin:$PATH"
-# set python path to the virtual environment
-ENV PYTHONPATH="/app/buissnes_agent:/app/.venv/lib/python3.14/site-packages"
+# keep the project root importable without hard-coding a Python minor version
+ENV PYTHONPATH="/app"
 # set tiktoken cache directory
 ENV TIKTOKEN_CACHE_DIR=/app/buissnes_agent
 # Disable Python output buffering for proper stdio communication
@@ -71,4 +70,4 @@ ENV PYTHONUNBUFFERED=1
 
 
 # Default to running the 'agent' if no other arguments are provided to docker run
-CMD ["uv", "run", "/app/buissnes_agent/a2a_agent/", "--host", "0.0.0.0"]
+CMD ["python", "-m", "buissnes_agent.a2a_agent", "--host", "0.0.0.0"]
