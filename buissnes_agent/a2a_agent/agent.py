@@ -13,6 +13,7 @@ import httpx
 from google.adk.tools.mcp_tool.mcp_tool import McpTool
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
@@ -166,6 +167,20 @@ def _message_key(message: BaseMessage) -> str:
 
 def _is_valid_langfuse_trace_id(value: str | None) -> bool:
     return bool(value and LANGFUSE_TRACE_ID_PATTERN.fullmatch(value))
+
+
+def _expand_langchain_prompt_messages(messages: list[Any]) -> list[Any]:
+    expanded_messages: list[Any] = []
+    for message in messages:
+        if (
+            isinstance(message, tuple)
+            and len(message) == 2
+            and isinstance(message[1], str)
+        ):
+            expanded_messages.append((message[0], expand_env_vars(message[1])))
+            continue
+        expanded_messages.append(message)
+    return expanded_messages
 
 
 class McpToolWrapper(BaseTool):
@@ -415,7 +430,10 @@ class AnalysisAgent:
         self._langfuse_prompt = None
         if self.langfuse_enabled and self.langfuse is not None:
             try:
-                prompt = self.langfuse.get_prompt(AGENT_SETTINGS, label='latest')
+                prompt = self.langfuse.get_prompt(
+                    AGENT_SETTINGS,
+                    label='production',
+                )
                 self._langfuse_prompt = prompt
                 self._last_prompt_source = 'langfuse'
                 return AgentRuntimeConfig(
@@ -444,6 +462,48 @@ class AnalysisAgent:
         return AgentRuntimeConfig(
             prompt=expand_env_vars(agent_config['prompt']),
             config=expand_env_vars(agent_config.get('config') or {}),
+        )
+
+    def _build_agent_prompt(self, prompt_text: str) -> Any:
+        langfuse_prompt = self._langfuse_prompt
+        if (
+            langfuse_prompt is None
+            or not hasattr(langfuse_prompt, 'get_langchain_prompt')
+        ):
+            return prompt_text
+
+        try:
+            langchain_prompt = langfuse_prompt.get_langchain_prompt()
+        except Exception:
+            logger.exception(
+                'Failed to convert the Langfuse prompt into a LangChain '
+                'prompt template. Falling back to the plain system prompt.'
+            )
+            return prompt_text
+
+        prompt_metadata = {'langfuse_prompt': langfuse_prompt}
+
+        if isinstance(langchain_prompt, list):
+            prompt_messages = _expand_langchain_prompt_messages(
+                list(langchain_prompt)
+            )
+            if not any(
+                isinstance(message, MessagesPlaceholder)
+                and message.variable_name == 'messages'
+                for message in prompt_messages
+            ):
+                prompt_messages.append(MessagesPlaceholder('messages'))
+            return ChatPromptTemplate(
+                messages=prompt_messages,
+                metadata=prompt_metadata,
+            )
+
+        return ChatPromptTemplate(
+            messages=[
+                ('system', expand_env_vars(langchain_prompt)),
+                MessagesPlaceholder('messages'),
+            ],
+            metadata=prompt_metadata,
         )
 
     async def _load_server_tools(
@@ -570,7 +630,7 @@ class AnalysisAgent:
                     new_model,
                     tools=new_tools,
                     checkpointer=memory,
-                    prompt=runtime_config.prompt,
+                    prompt=self._build_agent_prompt(runtime_config.prompt),
                     response_format=(self.FORMAT_INSTRUCTION, ResponseFormat),
                 )
             except Exception:
@@ -1109,8 +1169,6 @@ class AnalysisAgent:
                 metadata['langfuse_user_id'] = langfuse_request.user_id
             if langfuse_request.tags:
                 metadata['langfuse_tags'] = langfuse_request.tags
-        if self._langfuse_prompt is not None:
-            metadata['langfuse_prompt'] = self._langfuse_prompt
 
         config: dict[str, Any] = {
             'configurable': {

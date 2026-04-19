@@ -344,6 +344,12 @@ class AnalysisAgentExecutor(AgentExecutor):
             or combined_metadata.get('langfuseTraceId')
             or combined_metadata.get('trace_id')
         )
+        explicit_session_id = self._coerce_langfuse_value(
+            combined_metadata.get('langfuse_session_id')
+            or combined_metadata.get('langfuseSessionId')
+            or combined_metadata.get('session_id')
+            or combined_metadata.get('sessionId')
+        )
         trace_name = self._coerce_langfuse_value(
             combined_metadata.get('langfuse_trace_name')
             or combined_metadata.get('langfuseTraceName')
@@ -379,7 +385,7 @@ class AnalysisAgentExecutor(AgentExecutor):
 
         return LangfuseRequest(
             input_text=query,
-            session_id=context_id,
+            session_id=explicit_session_id or context_id,
             trace_name=trace_name,
             trace_id=trace_id,
             user_id=user_id,

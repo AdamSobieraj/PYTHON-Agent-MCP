@@ -13,6 +13,7 @@ import openai
 
 from google.protobuf.json_format import MessageToDict
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.prompts import ChatPromptTemplate
 
 from a2a.types import (
     Message,
@@ -490,6 +491,26 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             'msg-1',
         )
 
+    def test_build_langfuse_request_prefers_explicit_session_id(self) -> None:
+        executor = AnalysisAgentExecutor()
+        executor.agent.create_langfuse_trace_id = lambda seed: None
+
+        context = SimpleNamespace(
+            metadata={'langfuse_session_id': 'session-42'},
+            message=SimpleNamespace(message_id='msg-1', metadata={}),
+            call_context=SimpleNamespace(user=None),
+            tenant='tenant-a',
+        )
+
+        request = executor._build_langfuse_request(
+            context,
+            'Inspect this account',
+            task_id='task-1',
+            context_id='ctx-1',
+        )
+
+        self.assertEqual(request.session_id, 'session-42')
+
     def test_request_trace_ignores_invalid_explicit_trace_id(self) -> None:
         class FakeSpan:
             def __init__(self, **start_kwargs: Any) -> None:
@@ -537,14 +558,28 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(handler)
         self.assertIsNone(agent.langfuse.spans[0].start_kwargs['trace_context'])
 
-    def test_build_graph_config_carries_langfuse_prompt_metadata(self) -> None:
+    def test_build_agent_prompt_uses_langfuse_prompt_metadata(self) -> None:
         agent = AnalysisAgent()
         langfuse_prompt = SimpleNamespace(
             name='Analyst agent',
             version=11,
+            get_langchain_prompt=lambda: 'Use careful banking language.',
         )
         agent._langfuse_prompt = langfuse_prompt
 
+        prompt = agent._build_agent_prompt('Fallback prompt')
+
+        self.assertIsInstance(prompt, ChatPromptTemplate)
+        self.assertEqual(prompt.metadata['langfuse_prompt'], langfuse_prompt)
+        rendered_prompt = prompt.invoke({'messages': [('user', 'hello')]})
+        self.assertEqual(
+            rendered_prompt.messages[0].content,
+            'Use careful banking language.',
+        )
+        self.assertEqual(rendered_prompt.messages[1].content, 'hello')
+
+    def test_build_graph_config_sets_trace_attrs_without_prompt_object(self) -> None:
+        agent = AnalysisAgent()
         config = agent._build_graph_config(
             'ctx-1',
             langfuse_request=LangfuseRequest(
@@ -558,13 +593,10 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(config['run_name'], 'Custom trace')
-        self.assertEqual(
-            config['metadata']['langfuse_prompt'],
-            langfuse_prompt,
-        )
         self.assertEqual(config['metadata']['langfuse_session_id'], 'ctx-1')
         self.assertEqual(config['metadata']['langfuse_user_id'], 'user-1')
         self.assertEqual(config['metadata']['a2a_task_id'], 'task-1')
+        self.assertNotIn('langfuse_prompt', config['metadata'])
 
     async def test_analysis_agent_stream_updates_langfuse_request_span(self) -> None:
         class FakeHandler:
@@ -695,10 +727,6 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             agent.graph.config['metadata']['a2a_task_id'],
             'task-1',
-        )
-        self.assertEqual(
-            agent.graph.config['metadata']['langfuse_prompt'].name,
-            'Analyst agent',
         )
         self.assertEqual(agent.graph.config['run_name'], 'Deep Research Agent request')
         handler = agent.graph.config['callbacks'][0]
