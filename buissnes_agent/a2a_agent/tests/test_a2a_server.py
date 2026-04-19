@@ -1,5 +1,6 @@
 import unittest
 
+from contextlib import contextmanager
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +13,7 @@ import openai
 
 from google.protobuf.json_format import MessageToDict
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.prompts import ChatPromptTemplate
 
 from a2a.types import (
     Message,
@@ -27,7 +29,11 @@ from buissnes_agent.a2a_agent.__main__ import (
     _build_grpc_server,
     _build_request_handler,
 )
-from buissnes_agent.a2a_agent.agent import AnalysisAgent, ResponseFormat
+from buissnes_agent.a2a_agent.agent import (
+    AnalysisAgent,
+    LangfuseRequest,
+    ResponseFormat,
+)
 from buissnes_agent.a2a_agent.agent_executor import AnalysisAgentExecutor
 
 
@@ -43,6 +49,7 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             _self: AnalysisAgent,
             query: str,
             context_id: str,
+            **_: Any,
         ):
             if stream_error is not None:
                 raise stream_error
@@ -52,6 +59,11 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(AnalysisAgent, 'stream', new=fake_stream),
+            patch.object(
+                AnalysisAgent,
+                'create_langfuse_trace_id',
+                return_value=None,
+            ),
             patch.object(AnalysisAgentExecutor, 'startup', new=AsyncMock()),
             patch.object(AnalysisAgentExecutor, 'shutdown', new=AsyncMock()),
         ):
@@ -81,11 +93,19 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             _self: AnalysisAgent,
             query: str,
             context_id: str,
+            **_: Any,
         ):
             for item in stream_items:
                 yield item
 
-        with patch.object(AnalysisAgent, 'stream', new=fake_stream):
+        with (
+            patch.object(AnalysisAgent, 'stream', new=fake_stream),
+            patch.object(
+                AnalysisAgent,
+                'create_langfuse_trace_id',
+                return_value=None,
+            ),
+        ):
             agent_card = _build_agent_card(
                 public_host='127.0.0.1',
                 http_port=10000,
@@ -396,6 +416,8 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
         agent = AnalysisAgent()
         agent.graph = FakeGraph()
+        agent._langfuse_initialized = True
+        agent.langfuse_enabled = False
 
         items = []
         async for item in agent.stream('How big is the context?', 'ctx-1'):
@@ -416,6 +438,320 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[-1]['content'], 'Final answer draft')
         self.assertEqual(agent.graph.stream_mode, ['updates', 'custom'])
         self.assertEqual(agent.graph.version, 'v2')
+
+    def test_build_langfuse_request_uses_a2a_identifiers(self) -> None:
+        executor = AnalysisAgentExecutor()
+        executor.agent.create_langfuse_trace_id = (
+            lambda seed: '0123456789abcdef0123456789abcdef'
+        )
+
+        context = SimpleNamespace(
+            metadata={
+                'langfuse_tags': ['priority'],
+                'langfuse_trace_name': 'Custom request trace',
+            },
+            message=SimpleNamespace(
+                message_id='msg-1',
+                metadata={
+                    'customer_id': 'cust-7',
+                    'langfuse_user_id': 'metadata-user',
+                },
+            ),
+            call_context=SimpleNamespace(
+                user=SimpleNamespace(
+                    is_authenticated=True,
+                    user_name='auth-user',
+                )
+            ),
+            tenant='tenant-a',
+        )
+
+        request = executor._build_langfuse_request(
+            context,
+            'Inspect this account',
+            task_id='task-1',
+            context_id='ctx-1',
+        )
+
+        self.assertEqual(
+            request.trace_id,
+            '0123456789abcdef0123456789abcdef',
+        )
+        self.assertEqual(request.session_id, 'ctx-1')
+        self.assertEqual(request.user_id, 'auth-user')
+        self.assertEqual(request.trace_name, 'Custom request trace')
+        self.assertIn('priority', request.tags)
+        self.assertEqual(request.trace_metadata['a2a_task_id'], 'task-1')
+        self.assertEqual(
+            request.observation_metadata['message_metadata']['customer_id'],
+            'cust-7',
+        )
+        self.assertEqual(
+            request.langchain_metadata['a2a_message_id'],
+            'msg-1',
+        )
+
+    def test_build_langfuse_request_prefers_explicit_session_id(self) -> None:
+        executor = AnalysisAgentExecutor()
+        executor.agent.create_langfuse_trace_id = lambda seed: None
+
+        context = SimpleNamespace(
+            metadata={'langfuse_session_id': 'session-42'},
+            message=SimpleNamespace(message_id='msg-1', metadata={}),
+            call_context=SimpleNamespace(user=None),
+            tenant='tenant-a',
+        )
+
+        request = executor._build_langfuse_request(
+            context,
+            'Inspect this account',
+            task_id='task-1',
+            context_id='ctx-1',
+        )
+
+        self.assertEqual(request.session_id, 'session-42')
+
+    def test_request_trace_ignores_invalid_explicit_trace_id(self) -> None:
+        class FakeSpan:
+            def __init__(self, **start_kwargs: Any) -> None:
+                self.start_kwargs = start_kwargs
+                self.trace_id = 'fedcba9876543210fedcba9876543210'
+                self.id = '0123456789abcdef'
+
+            def update(self, **kwargs: Any) -> None:
+                return None
+
+            def set_trace_io(self, **kwargs: Any) -> None:
+                return None
+
+            def end(self) -> None:
+                return None
+
+        class FakeLangfuseClient:
+            def __init__(self) -> None:
+                self.spans: list[FakeSpan] = []
+
+            def start_observation(self, **kwargs: Any) -> FakeSpan:
+                span = FakeSpan(**kwargs)
+                self.spans.append(span)
+                return span
+
+        @contextmanager
+        def fake_propagate_attributes(**kwargs: Any):
+            yield
+
+        agent = AnalysisAgent()
+        agent._langfuse_initialized = True
+        agent.langfuse_enabled = True
+        agent.langfuse = FakeLangfuseClient()
+        agent._langfuse_propagate_attributes = fake_propagate_attributes
+
+        root_span, handler = agent._request_trace(
+            LangfuseRequest(
+                input_text='hello',
+                session_id='ctx-1',
+                trace_id='not-a-valid-trace-id',
+            )
+        )
+
+        self.assertIsNotNone(root_span)
+        self.assertIsNone(handler)
+        self.assertIsNone(agent.langfuse.spans[0].start_kwargs['trace_context'])
+
+    def test_build_agent_prompt_uses_langfuse_prompt_metadata(self) -> None:
+        agent = AnalysisAgent()
+        langfuse_prompt = SimpleNamespace(
+            name='Analyst agent',
+            version=11,
+            get_langchain_prompt=lambda: 'Use careful banking language.',
+        )
+        agent._langfuse_prompt = langfuse_prompt
+
+        prompt = agent._build_agent_prompt('Fallback prompt')
+
+        self.assertIsInstance(prompt, ChatPromptTemplate)
+        self.assertEqual(prompt.metadata['langfuse_prompt'], langfuse_prompt)
+        rendered_prompt = prompt.invoke({'messages': [('user', 'hello')]})
+        self.assertEqual(
+            rendered_prompt.messages[0].content,
+            'Use careful banking language.',
+        )
+        self.assertEqual(rendered_prompt.messages[1].content, 'hello')
+
+    def test_build_graph_config_sets_trace_attrs_without_prompt_object(self) -> None:
+        agent = AnalysisAgent()
+        config = agent._build_graph_config(
+            'ctx-1',
+            langfuse_request=LangfuseRequest(
+                input_text='hello',
+                session_id='ctx-1',
+                trace_name='Custom trace',
+                user_id='user-1',
+                tags=['a2a', 'priority'],
+                langchain_metadata={'a2a_task_id': 'task-1'},
+            ),
+        )
+
+        self.assertEqual(config['run_name'], 'Custom trace')
+        self.assertEqual(config['metadata']['langfuse_session_id'], 'ctx-1')
+        self.assertEqual(config['metadata']['langfuse_user_id'], 'user-1')
+        self.assertEqual(config['metadata']['a2a_task_id'], 'task-1')
+        self.assertNotIn('langfuse_prompt', config['metadata'])
+
+    async def test_analysis_agent_stream_updates_langfuse_request_span(self) -> None:
+        class FakeHandler:
+            def __init__(
+                self,
+                *,
+                trace_context: dict[str, str] | None = None,
+            ) -> None:
+                self.trace_context = trace_context
+
+        class FakeSpan:
+            def __init__(self, **start_kwargs: Any) -> None:
+                self.start_kwargs = start_kwargs
+                trace_context = dict(start_kwargs.get('trace_context') or {})
+                self.trace_id = trace_context.get(
+                    'trace_id',
+                    'fedcba9876543210fedcba9876543210',
+                )
+                self.id = '0123456789abcdef'
+                self.updates: list[dict[str, Any]] = []
+                self.trace_io_updates: list[dict[str, Any]] = []
+                self.end_calls = 0
+
+            def update(self, **kwargs: Any) -> None:
+                self.updates.append(kwargs)
+
+            def set_trace_io(self, **kwargs: Any) -> None:
+                self.trace_io_updates.append(kwargs)
+
+            def end(self) -> None:
+                self.end_calls += 1
+
+        class FakeLangfuseClient:
+            def __init__(self) -> None:
+                self.spans: list[FakeSpan] = []
+
+            def start_observation(self, **kwargs: Any) -> FakeSpan:
+                span = FakeSpan(**kwargs)
+                self.spans.append(span)
+                return span
+
+        propagation_calls: list[dict[str, Any]] = []
+
+        @contextmanager
+        def fake_propagate_attributes(**kwargs: Any):
+            propagation_calls.append(kwargs)
+            yield
+
+        class FakeGraph:
+            async def astream(
+                self,
+                inputs: dict[str, Any],
+                config: dict[str, Any],
+                stream_mode: list[str],
+                version: str,
+            ):
+                self.inputs = inputs
+                self.config = config
+                self.stream_mode = stream_mode
+                self.version = version
+                yield {
+                    'type': 'updates',
+                    'data': {
+                        'agent': {
+                            'messages': [AIMessage(content='Final answer draft')]
+                        }
+                    },
+                }
+
+            async def aget_state(self, config: dict[str, Any]):
+                return SimpleNamespace(
+                    values={
+                        'messages': [AIMessage(content='Final answer draft')],
+                        'structured_response': ResponseFormat(
+                            status='completed',
+                            message='Final answer draft',
+                        ),
+                    }
+                )
+
+        agent = AnalysisAgent()
+        agent.graph = FakeGraph()
+        agent._langfuse_initialized = True
+        agent.langfuse_enabled = True
+        agent.langfuse = FakeLangfuseClient()
+        agent._langfuse_callback_handler_cls = FakeHandler
+        agent._langfuse_propagate_attributes = fake_propagate_attributes
+        agent._langfuse_prompt = SimpleNamespace(name='Analyst agent', version=11)
+
+        request = LangfuseRequest(
+            input_text='How big is the context?',
+            session_id='ctx-1',
+            trace_id='0123456789abcdef0123456789abcdef',
+            user_id='user-123',
+            tags=['a2a', 'langgraph', 'priority'],
+            trace_metadata={'a2a_task_id': 'task-1'},
+            observation_metadata={'a2a_task_id': 'task-1'},
+            langchain_metadata={'a2a_task_id': 'task-1'},
+        )
+
+        items = []
+        async for item in agent.stream(
+            'How big is the context?',
+            'ctx-1',
+            langfuse_request=request,
+        ):
+            items.append(item)
+
+        self.assertEqual(items[-1]['content'], 'Final answer draft')
+        self.assertEqual(len(agent.langfuse.spans), 1)
+        root_span = agent.langfuse.spans[0]
+        self.assertEqual(root_span.start_kwargs['input'], 'How big is the context?')
+        self.assertEqual(
+            root_span.start_kwargs['trace_context'],
+            {'trace_id': '0123456789abcdef0123456789abcdef'},
+        )
+        self.assertEqual(propagation_calls[0]['session_id'], 'ctx-1')
+        self.assertEqual(propagation_calls[0]['user_id'], 'user-123')
+        self.assertIn('priority', propagation_calls[0]['tags'])
+        self.assertEqual(
+            agent.graph.config['metadata']['langfuse_session_id'],
+            'ctx-1',
+        )
+        self.assertEqual(
+            agent.graph.config['metadata']['langfuse_user_id'],
+            'user-123',
+        )
+        self.assertEqual(
+            agent.graph.config['metadata']['a2a_task_id'],
+            'task-1',
+        )
+        self.assertEqual(agent.graph.config['run_name'], 'Deep Research Agent request')
+        handler = agent.graph.config['callbacks'][0]
+        self.assertIsInstance(handler, FakeHandler)
+        self.assertEqual(
+            handler.trace_context,
+            {
+                'trace_id': '0123456789abcdef0123456789abcdef',
+                'parent_span_id': '0123456789abcdef',
+            },
+        )
+        self.assertEqual(
+            root_span.trace_io_updates[0]['input'],
+            'How big is the context?',
+        )
+        self.assertEqual(
+            root_span.trace_io_updates[-1]['output'],
+            'Final answer draft',
+        )
+        self.assertEqual(root_span.updates[-1]['output'], 'Final answer draft')
+        self.assertEqual(
+            root_span.updates[-1]['metadata']['task_state'],
+            'completed',
+        )
+        self.assertEqual(root_span.end_calls, 1)
 
 
 if __name__ == '__main__':

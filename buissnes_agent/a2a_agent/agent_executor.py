@@ -16,9 +16,13 @@ from a2a.types import (
 )
 
 try:
-    from .agent import AnalysisAgent
+    from .agent import AGENT_SETTINGS, AnalysisAgent, LangfuseRequest
 except ImportError:
-    from buissnes_agent.a2a_agent.agent import AnalysisAgent  # type: ignore
+    from buissnes_agent.a2a_agent.agent import (  # type: ignore
+        AGENT_SETTINGS,
+        AnalysisAgent,
+        LangfuseRequest,
+    )
 
 
 logging.basicConfig(level=logging.INFO)
@@ -79,10 +83,20 @@ class AnalysisAgentExecutor(AgentExecutor):
         )
 
         query = context.get_user_input()
+        langfuse_request = self._build_langfuse_request(
+            context,
+            query,
+            task_id=task_id,
+            context_id=context_id,
+        )
         last_status_signature: tuple[str, str] | None = None
 
         try:
-            async for item in self.agent.stream(query, context_id):
+            async for item in self.agent.stream(
+                query,
+                context_id,
+                langfuse_request=langfuse_request,
+            ):
                 task_state = self._resolve_task_state(item)
                 content = self._resolve_content(item, task_state=task_state)
                 metadata = self._resolve_metadata(
@@ -232,6 +246,154 @@ class AnalysisAgentExecutor(AgentExecutor):
         if isinstance(value, (list, tuple)):
             return [self._json_safe(item) for item in value]
         return str(value)
+
+    def _coerce_langfuse_value(self, value: Any) -> str | None:
+        if value is None:
+            return None
+
+        text = str(value).strip()
+        if not text:
+            return None
+        return text[:200]
+
+    def _coerce_langfuse_tags(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            candidates = [item.strip() for item in value.split(',')]
+        elif isinstance(value, (list, tuple, set)):
+            candidates = [str(item).strip() for item in value]
+        else:
+            return []
+
+        unique_tags: list[str] = []
+        for candidate in candidates:
+            if candidate and candidate not in unique_tags:
+                unique_tags.append(candidate[:200])
+        return unique_tags
+
+    def _coerce_metadata_dict(self, value: Any) -> dict[str, Any]:
+        if not value:
+            return {}
+
+        if isinstance(value, dict):
+            return self._json_safe(value)
+
+        try:
+            return self._json_safe(dict(value))
+        except Exception:
+            return {}
+
+    def _compact_trace_metadata(
+        self,
+        metadata: dict[str, Any],
+    ) -> dict[str, str]:
+        compact: dict[str, str] = {}
+        for key, value in metadata.items():
+            text = self._coerce_langfuse_value(value)
+            if text is None:
+                continue
+            compact[str(key)] = text
+        return compact
+
+    def _resolve_langfuse_user_id(
+        self,
+        context: RequestContext,
+        metadata: dict[str, Any],
+    ) -> str | None:
+        user = getattr(context.call_context, 'user', None)
+        if (
+            user is not None
+            and getattr(user, 'is_authenticated', False)
+            and getattr(user, 'user_name', '')
+        ):
+            return self._coerce_langfuse_value(user.user_name)
+
+        for key in (
+            'langfuse_user_id',
+            'langfuseUserId',
+            'user_id',
+            'userId',
+            'end_user_id',
+            'endUserId',
+        ):
+            value = self._coerce_langfuse_value(metadata.get(key))
+            if value is not None:
+                return value
+
+        return None
+
+    def _build_langfuse_request(
+        self,
+        context: RequestContext,
+        query: str,
+        *,
+        task_id: str,
+        context_id: str,
+    ) -> LangfuseRequest:
+        request_metadata = self._coerce_metadata_dict(context.metadata)
+        message_metadata = self._coerce_metadata_dict(
+            getattr(context.message, 'metadata', None)
+        )
+        combined_metadata = {**request_metadata, **message_metadata}
+        user_id = self._resolve_langfuse_user_id(context, combined_metadata)
+
+        explicit_trace_id = self._coerce_langfuse_value(
+            combined_metadata.get('langfuse_trace_id')
+            or combined_metadata.get('langfuseTraceId')
+            or combined_metadata.get('trace_id')
+        )
+        explicit_session_id = self._coerce_langfuse_value(
+            combined_metadata.get('langfuse_session_id')
+            or combined_metadata.get('langfuseSessionId')
+            or combined_metadata.get('session_id')
+            or combined_metadata.get('sessionId')
+        )
+        trace_name = self._coerce_langfuse_value(
+            combined_metadata.get('langfuse_trace_name')
+            or combined_metadata.get('langfuseTraceName')
+        ) or 'Deep Research Agent request'
+        tags = ['a2a', 'langgraph']
+        for tag in self._coerce_langfuse_tags(
+            combined_metadata.get('langfuse_tags')
+            or combined_metadata.get('langfuseTags')
+        ):
+            if tag not in tags:
+                tags.append(tag)
+
+        message_id = self._coerce_langfuse_value(
+            getattr(context.message, 'message_id', None)
+        )
+        trace_id = explicit_trace_id or self.agent.create_langfuse_trace_id(
+            task_id or message_id
+        )
+        core_metadata = {
+            'a2a_task_id': task_id,
+            'a2a_context_id': context_id,
+            'a2a_message_id': message_id,
+            'a2a_tenant': context.tenant,
+            'agent_settings': AGENT_SETTINGS,
+        }
+
+        observation_metadata = {
+            **core_metadata,
+            'request_metadata': request_metadata or None,
+            'message_metadata': message_metadata or None,
+            'langfuse_user_id': user_id,
+        }
+
+        return LangfuseRequest(
+            input_text=query,
+            session_id=explicit_session_id or context_id,
+            trace_name=trace_name,
+            trace_id=trace_id,
+            user_id=user_id,
+            tags=tags,
+            trace_metadata=self._compact_trace_metadata(core_metadata),
+            observation_metadata=self._json_safe(observation_metadata),
+            langchain_metadata=self._json_safe(core_metadata),
+        )
 
     def _extract_openai_error_message(
         self,

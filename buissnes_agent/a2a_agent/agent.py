@@ -2,15 +2,18 @@ import asyncio
 import json
 import logging
 import os
+import re
 
 from collections import Counter
 from collections.abc import AsyncIterable
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
 import httpx
 from google.adk.tools.mcp_tool.mcp_tool import McpTool
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
@@ -47,6 +50,7 @@ SSL_VERIFY = os.getenv('SSL_VERIFY', 'False').lower() in ('true', '1', 't')
 MAX_STATUS_TEXT_LENGTH = 280
 MAX_TOOL_ARG_PREVIEW_LENGTH = 220
 MAX_TOOL_RESULT_PREVIEW_LENGTH = 200
+LANGFUSE_TRACE_ID_PATTERN = re.compile(r'^[0-9a-f]{32}$')
 
 
 class AgentStreamItem(TypedDict, total=False):
@@ -62,6 +66,19 @@ class ResponseFormat(BaseModel):
 
     status: Literal['input_required', 'completed', 'error'] = 'input_required'
     message: str
+
+
+@dataclass(slots=True)
+class LangfuseRequest:
+    input_text: str
+    session_id: str
+    trace_name: str = 'Deep Research Agent request'
+    trace_id: str | None = None
+    user_id: str | None = None
+    tags: list[str] = field(default_factory=lambda: ['a2a', 'langgraph'])
+    trace_metadata: dict[str, str] = field(default_factory=dict)
+    observation_metadata: dict[str, Any] = field(default_factory=dict)
+    langchain_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _langfuse_requested() -> bool:
@@ -146,6 +163,24 @@ def _message_key(message: BaseMessage) -> str:
         {'type': getattr(message, 'type', 'unknown'), 'content': str(message)},
         limit=512,
     )
+
+
+def _is_valid_langfuse_trace_id(value: str | None) -> bool:
+    return bool(value and LANGFUSE_TRACE_ID_PATTERN.fullmatch(value))
+
+
+def _expand_langchain_prompt_messages(messages: list[Any]) -> list[Any]:
+    expanded_messages: list[Any] = []
+    for message in messages:
+        if (
+            isinstance(message, tuple)
+            and len(message) == 2
+            and isinstance(message[1], str)
+        ):
+            expanded_messages.append((message[0], expand_env_vars(message[1])))
+            continue
+        expanded_messages.append(message)
+    return expanded_messages
 
 
 class McpToolWrapper(BaseTool):
@@ -281,7 +316,9 @@ class AnalysisAgent:
         self._langfuse_initialized = False
         self.langfuse_enabled = False
         self.langfuse = None
-        self.langfuse_handler = None
+        self._langfuse_prompt = None
+        self._langfuse_callback_handler_cls = None
+        self._langfuse_propagate_attributes = None
         self._last_prompt_source = 'local_default'
 
     def _initialize_langfuse(self) -> None:
@@ -296,7 +333,7 @@ class AnalysisAgent:
             return
 
         try:
-            from langfuse import get_client
+            from langfuse import get_client, propagate_attributes
             from langfuse.langchain import CallbackHandler
         except Exception as exc:
             logger.exception(
@@ -314,7 +351,8 @@ class AnalysisAgent:
                 )
                 return
             self.langfuse = client
-            self.langfuse_handler = CallbackHandler()
+            self._langfuse_callback_handler_cls = CallbackHandler
+            self._langfuse_propagate_attributes = propagate_attributes
             self.langfuse_enabled = True
             logger.info('Langfuse is authenticated and ready.')
         except Exception as exc:
@@ -322,6 +360,44 @@ class AnalysisAgent:
                 'Failed to initialize Langfuse. Continuing without tracing: %s',
                 exc,
             )
+
+    def create_langfuse_trace_id(self, seed: str | None) -> str | None:
+        if not seed:
+            return None
+
+        self._initialize_langfuse()
+        if not self.langfuse_enabled or self.langfuse is None:
+            return None
+
+        try:
+            return self.langfuse.create_trace_id(seed=seed)
+        except Exception:
+            logger.exception(
+                'Failed to create a deterministic Langfuse trace id for seed %r.',
+                seed,
+            )
+            return None
+
+    def _create_langfuse_handler(
+        self,
+        *,
+        trace_context: dict[str, str] | None = None,
+    ):
+        if (
+            not self.langfuse_enabled
+            or self._langfuse_callback_handler_cls is None
+        ):
+            return None
+
+        try:
+            return self._langfuse_callback_handler_cls(
+                trace_context=trace_context
+            )
+        except Exception:
+            logger.exception(
+                'Failed to create a Langfuse callback handler for a request.'
+            )
+            return None
 
     def _stream_item(
         self,
@@ -351,9 +427,14 @@ class AnalysisAgent:
 
     def _load_runtime_config(self) -> AgentRuntimeConfig:
         self._initialize_langfuse()
+        self._langfuse_prompt = None
         if self.langfuse_enabled and self.langfuse is not None:
             try:
-                prompt = self.langfuse.get_prompt(AGENT_SETTINGS, label='latest')
+                prompt = self.langfuse.get_prompt(
+                    AGENT_SETTINGS,
+                    label='production',
+                )
+                self._langfuse_prompt = prompt
                 self._last_prompt_source = 'langfuse'
                 return AgentRuntimeConfig(
                     prompt=expand_env_vars(prompt.prompt),
@@ -381,6 +462,48 @@ class AnalysisAgent:
         return AgentRuntimeConfig(
             prompt=expand_env_vars(agent_config['prompt']),
             config=expand_env_vars(agent_config.get('config') or {}),
+        )
+
+    def _build_agent_prompt(self, prompt_text: str) -> Any:
+        langfuse_prompt = self._langfuse_prompt
+        if (
+            langfuse_prompt is None
+            or not hasattr(langfuse_prompt, 'get_langchain_prompt')
+        ):
+            return prompt_text
+
+        try:
+            langchain_prompt = langfuse_prompt.get_langchain_prompt()
+        except Exception:
+            logger.exception(
+                'Failed to convert the Langfuse prompt into a LangChain '
+                'prompt template. Falling back to the plain system prompt.'
+            )
+            return prompt_text
+
+        prompt_metadata = {'langfuse_prompt': langfuse_prompt}
+
+        if isinstance(langchain_prompt, list):
+            prompt_messages = _expand_langchain_prompt_messages(
+                list(langchain_prompt)
+            )
+            if not any(
+                isinstance(message, MessagesPlaceholder)
+                and message.variable_name == 'messages'
+                for message in prompt_messages
+            ):
+                prompt_messages.append(MessagesPlaceholder('messages'))
+            return ChatPromptTemplate(
+                messages=prompt_messages,
+                metadata=prompt_metadata,
+            )
+
+        return ChatPromptTemplate(
+            messages=[
+                ('system', expand_env_vars(langchain_prompt)),
+                MessagesPlaceholder('messages'),
+            ],
+            metadata=prompt_metadata,
         )
 
     async def _load_server_tools(
@@ -507,7 +630,7 @@ class AnalysisAgent:
                     new_model,
                     tools=new_tools,
                     checkpointer=memory,
-                    prompt=runtime_config.prompt,
+                    prompt=self._build_agent_prompt(runtime_config.prompt),
                     response_format=(self.FORMAT_INSTRUCTION, ResponseFormat),
                 )
             except Exception:
@@ -731,6 +854,11 @@ class AnalysisAgent:
         self.toolsets = []
         await self._close_toolsets(list(self._stale_toolsets))
         self._stale_toolsets = []
+        if self.langfuse is not None:
+            try:
+                self.langfuse.flush()
+            except Exception:
+                logger.exception('Failed to flush Langfuse before shutdown.')
         await self._async_http_client.aclose()
         self._sync_http_client.close()
         self.graph = None
@@ -891,57 +1019,249 @@ class AnalysisAgent:
 
         return []
 
-    def _build_graph_config(self, context_id: str) -> dict[str, Any]:
-        return {
+    def _request_trace(
+        self,
+        langfuse_request: LangfuseRequest | None,
+    ) -> tuple[Any | None, Any | None]:
+        self._initialize_langfuse()
+        if (
+            langfuse_request is None
+            or not self.langfuse_enabled
+            or self.langfuse is None
+        ):
+            return None, None
+
+        trace_context = None
+        if langfuse_request.trace_id:
+            if _is_valid_langfuse_trace_id(langfuse_request.trace_id):
+                trace_context = {'trace_id': langfuse_request.trace_id}
+            else:
+                logger.warning(
+                    'Ignoring invalid explicit Langfuse trace id: %r',
+                    langfuse_request.trace_id,
+                )
+        propagation_kwargs: dict[str, Any] = {}
+        if langfuse_request.user_id:
+            propagation_kwargs['user_id'] = langfuse_request.user_id
+        if langfuse_request.session_id:
+            propagation_kwargs['session_id'] = langfuse_request.session_id
+        if langfuse_request.trace_metadata:
+            propagation_kwargs['metadata'] = langfuse_request.trace_metadata
+        if langfuse_request.tags:
+            propagation_kwargs['tags'] = langfuse_request.tags
+        if langfuse_request.trace_name:
+            propagation_kwargs['trace_name'] = langfuse_request.trace_name
+
+        try:
+            if self._langfuse_propagate_attributes is not None:
+                with self._langfuse_propagate_attributes(**propagation_kwargs):
+                    root_span = self.langfuse.start_observation(
+                        name=langfuse_request.trace_name,
+                        as_type='span',
+                        trace_context=trace_context,
+                        input=langfuse_request.input_text,
+                        metadata=langfuse_request.observation_metadata or None,
+                    )
+            else:
+                root_span = self.langfuse.start_observation(
+                    name=langfuse_request.trace_name,
+                    as_type='span',
+                    trace_context=trace_context,
+                    input=langfuse_request.input_text,
+                    metadata=langfuse_request.observation_metadata or None,
+                )
+        except Exception:
+            logger.exception('Failed to create a Langfuse request span.')
+            return None, None
+
+        self._set_request_trace_io(
+            root_span,
+            input_text=langfuse_request.input_text,
+        )
+        handler = self._create_langfuse_handler(
+            trace_context={
+                'trace_id': root_span.trace_id,
+                'parent_span_id': root_span.id,
+            }
+        )
+        return root_span, handler
+
+    def _set_request_trace_io(
+        self,
+        root_span: Any,
+        *,
+        input_text: str | None = None,
+        output: str | None = None,
+    ) -> None:
+        if root_span is None or not hasattr(root_span, 'set_trace_io'):
+            return
+
+        update_payload: dict[str, Any] = {}
+        if input_text is not None:
+            update_payload['input'] = input_text
+        if output is not None:
+            update_payload['output'] = output
+        if not update_payload:
+            return
+
+        try:
+            root_span.set_trace_io(**update_payload)
+        except Exception:
+            logger.exception(
+                'Failed to update trace-level Langfuse input/output.'
+            )
+
+    def _update_request_trace(
+        self,
+        root_span: Any,
+        *,
+        output: str | None = None,
+        task_state: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        level: str | None = None,
+        status_message: str | None = None,
+    ) -> None:
+        update_payload: dict[str, Any] = {}
+        if output is not None:
+            update_payload['output'] = output
+            self._set_request_trace_io(root_span, output=output)
+        merged_metadata = dict(metadata or {})
+        if task_state:
+            merged_metadata.setdefault('task_state', task_state)
+        if self._last_prompt_source:
+            merged_metadata.setdefault('prompt_source', self._last_prompt_source)
+        if merged_metadata:
+            update_payload['metadata'] = merged_metadata
+        if level is not None:
+            update_payload['level'] = level
+        if status_message is not None:
+            update_payload['status_message'] = status_message
+
+        if not update_payload:
+            return
+
+        try:
+            root_span.update(**update_payload)
+        except Exception:
+            logger.exception('Failed to update the Langfuse request span.')
+
+    def _end_request_trace(self, root_span: Any) -> None:
+        if root_span is None:
+            return
+
+        try:
+            root_span.end()
+        except Exception:
+            logger.exception('Failed to close the Langfuse request span.')
+
+    def _build_graph_config(
+        self,
+        context_id: str,
+        *,
+        langfuse_request: LangfuseRequest | None = None,
+        langfuse_handler: Any = None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        if langfuse_request is not None:
+            metadata.update(langfuse_request.langchain_metadata)
+            metadata['langfuse_session_id'] = langfuse_request.session_id
+            if langfuse_request.user_id:
+                metadata['langfuse_user_id'] = langfuse_request.user_id
+            if langfuse_request.tags:
+                metadata['langfuse_tags'] = langfuse_request.tags
+
+        config: dict[str, Any] = {
             'configurable': {
                 'thread_id': context_id,
             },
-            'callbacks': [self.langfuse_handler] if self.langfuse_handler else [],
-            'metadata': {
-                'langfuse_session_id': context_id,
-            },
+            'callbacks': [langfuse_handler] if langfuse_handler else [],
+            'metadata': metadata,
         }
+        if langfuse_request is not None and langfuse_request.trace_name:
+            config['run_name'] = langfuse_request.trace_name
+
+        return config
 
     async def stream(
         self,
         query: str,
         context_id: str,
+        *,
+        langfuse_request: LangfuseRequest | None = None,
     ) -> AsyncIterable[AgentStreamItem]:
         self._active_streams += 1
+        root_span = None
         try:
-            for item in await self.initialize():
-                yield item
-
-            if self.graph is None:
-                raise RuntimeError('Agent graph was not initialized.')
-
-            inputs = {'messages': [('user', query)]}
-            config = self._build_graph_config(context_id)
-            seen_message_keys: set[str] = set()
-
-            yield self._stream_item(
-                'Reviewing the request and conversation context...',
-                metadata={'phase': 'planning', 'context_id': context_id},
+            request_trace = langfuse_request or LangfuseRequest(
+                input_text=query,
+                session_id=context_id,
             )
-            yield self._stream_item(
-                'Sending the request to the language model...',
-                metadata={'phase': 'model_call', 'context_id': context_id},
-            )
+            root_span, langfuse_handler = self._request_trace(request_trace)
 
-            async for chunk in self.graph.astream(
-                inputs,
-                config,
-                stream_mode=['updates', 'custom'],
-                version='v2',
-            ):
-                for item in self._map_graph_chunk(
-                    chunk,
-                    seen_message_keys=seen_message_keys,
-                ):
+            try:
+                for item in await self.initialize():
                     yield item
 
-            yield await self.get_agent_response(config)
+                if root_span is not None:
+                    self._update_request_trace(
+                        root_span,
+                        metadata={'phase': 'initialized'},
+                    )
+
+                if self.graph is None:
+                    raise RuntimeError('Agent graph was not initialized.')
+
+                inputs = {'messages': [('user', query)]}
+                config = self._build_graph_config(
+                    context_id,
+                    langfuse_request=request_trace,
+                    langfuse_handler=langfuse_handler,
+                )
+                seen_message_keys: set[str] = set()
+
+                yield self._stream_item(
+                    'Reviewing the request and conversation context...',
+                    metadata={'phase': 'planning', 'context_id': context_id},
+                )
+                yield self._stream_item(
+                    'Sending the request to the language model...',
+                    metadata={'phase': 'model_call', 'context_id': context_id},
+                )
+
+                async for chunk in self.graph.astream(
+                    inputs,
+                    config,
+                    stream_mode=['updates', 'custom'],
+                    version='v2',
+                ):
+                    for item in self._map_graph_chunk(
+                        chunk,
+                        seen_message_keys=seen_message_keys,
+                    ):
+                        yield item
+
+                final_item = await self.get_agent_response(config)
+                if root_span is not None:
+                    self._update_request_trace(
+                        root_span,
+                        output=final_item.get('content'),
+                        task_state=final_item.get('task_state'),
+                        metadata=final_item.get('metadata'),
+                    )
+                yield final_item
+            except Exception as exc:
+                if root_span is not None:
+                    self._update_request_trace(
+                        root_span,
+                        output=str(exc),
+                        task_state='failed',
+                        metadata={'phase': 'failed'},
+                        level='ERROR',
+                        status_message=str(exc),
+                    )
+                raise
         finally:
+            self._end_request_trace(root_span)
             self._active_streams -= 1
             await self._maybe_close_stale_toolsets()
 
