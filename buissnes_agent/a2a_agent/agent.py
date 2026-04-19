@@ -5,107 +5,158 @@ import os
 
 from collections import Counter
 from collections.abc import AsyncIterable
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 import httpx
 from google.adk.tools.mcp_tool.mcp_tool import McpTool
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langfuse import get_client
-from langfuse.langchain import CallbackHandler
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.config import get_stream_writer
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field, create_model
 
 try:
+    from . import patch_pydantic  # noqa: F401
     from .mcp_config import (
         AgentRuntimeConfig,
+        McpServerConfig,
         expand_env_vars,
         matches_tool_filters,
         resolve_mcp_servers,
     )
-    from . import patch_pydantic  # noqa: F401
 except ImportError:
-    from mcp_config import (  # type: ignore
+    from buissnes_agent.a2a_agent import patch_pydantic  # type: ignore  # noqa: F401
+    from buissnes_agent.a2a_agent.mcp_config import (  # type: ignore
         AgentRuntimeConfig,
+        McpServerConfig,
         expand_env_vars,
         matches_tool_filters,
         resolve_mcp_servers,
     )
-    import patch_pydantic  # type: ignore  # noqa: F401
+
 
 logger = logging.getLogger(__name__)
 memory = MemorySaver()
 
-AGENT_SETTINGS = os.getenv("AGENT_SETTINGS", "Analyst agent")
-SSL_VERIFY = os.getenv("SSL_VERIFY", 'False').lower() in ('true', '1', 't')
+AGENT_SETTINGS = os.getenv('AGENT_SETTINGS', 'Analyst agent')
+SSL_VERIFY = os.getenv('SSL_VERIFY', 'False').lower() in ('true', '1', 't')
 
-langfuse = None
-langfuse_enabled = False
-langfuse_handler = None
-langfuse_initialized = False
-
-
-def _ensure_langfuse_client():
-    global langfuse
-    global langfuse_enabled
-    global langfuse_initialized
-
-    if langfuse_initialized:
-        return langfuse, langfuse_enabled
-
-    langfuse_initialized = True
-    langfuse = get_client()
-    try:
-        if langfuse.auth_check():
-            logger.info("Langfuse is authenticated and ready.")
-            langfuse_enabled = True
-        else:
-            logger.warning(
-                "Langfuse authentication failed. Falling back to local config."
-            )
-    except Exception as exc:
-        logger.warning(
-            "Failed to connect to Langfuse. Falling back to local config. Error: %s",
-            exc,
-        )
-
-    return langfuse, langfuse_enabled
+MAX_STATUS_TEXT_LENGTH = 280
+MAX_TOOL_ARG_PREVIEW_LENGTH = 220
+MAX_TOOL_RESULT_PREVIEW_LENGTH = 200
 
 
-def _get_langfuse_handler():
-    global langfuse_handler
-
-    _client, enabled = _ensure_langfuse_client()
-    if not enabled:
-        return None
-
-    if langfuse_handler is None:
-        langfuse_handler = CallbackHandler()
-
-    return langfuse_handler
+class AgentStreamItem(TypedDict, total=False):
+    content: str
+    task_state: Literal['working', 'completed', 'input_required', 'failed']
+    is_task_complete: bool
+    require_user_input: bool
+    metadata: dict[str, Any]
 
 
 class ResponseFormat(BaseModel):
     """Respond to the user in this format."""
-    
+
     status: Literal['input_required', 'completed', 'error'] = 'input_required'
     message: str
 
 
+def _langfuse_requested() -> bool:
+    enabled = os.getenv('LANGFUSE_ENABLED')
+    if enabled is not None and enabled.lower() in {'0', 'false', 'no', 'off'}:
+        return False
+
+    return bool(
+        os.getenv('LANGFUSE_PUBLIC_KEY') and os.getenv('LANGFUSE_SECRET_KEY')
+    )
+
+
+def _truncate_text(
+    value: str,
+    *,
+    limit: int,
+    suffix: str = '...',
+) -> str:
+    text = ' '.join(value.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - len(suffix)].rstrip() + suffix
+
+
+def _preview_json(
+    value: Any,
+    *,
+    limit: int,
+) -> str:
+    try:
+        text = json.dumps(value, default=str, ensure_ascii=True, sort_keys=True)
+    except TypeError:
+        text = str(value)
+    return _truncate_text(text, limit=limit)
+
+
+def _extract_message_text(message: BaseMessage) -> str:
+    content = getattr(message, 'content', '')
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                text_parts.append(block)
+                continue
+            if isinstance(block, dict) and block.get('type') == 'text':
+                text = block.get('text')
+                if isinstance(text, str):
+                    text_parts.append(text)
+        return ' '.join(part.strip() for part in text_parts if part).strip()
+    return str(content).strip()
+
+
+def _message_key(message: BaseMessage) -> str:
+    message_id = getattr(message, 'id', None)
+    if message_id:
+        return str(message_id)
+
+    if isinstance(message, AIMessage):
+        return _preview_json(
+            {
+                'type': 'ai',
+                'content': _extract_message_text(message),
+                'tool_calls': message.tool_calls,
+            },
+            limit=512,
+        )
+
+    if isinstance(message, ToolMessage):
+        return _preview_json(
+            {
+                'type': 'tool',
+                'tool_call_id': message.tool_call_id,
+                'status': message.status,
+                'content': _extract_message_text(message),
+            },
+            limit=512,
+        )
+
+    return _preview_json(
+        {'type': getattr(message, 'type', 'unknown'), 'content': str(message)},
+        limit=512,
+    )
+
 
 class McpToolWrapper(BaseTool):
     """Wrapper for Google ADK MCP Tool to be compatible with LangChain."""
-    
+
     mcp_tool: Any = Field(exclude=True)
-    
+
     def __init__(self, mcp_tool: McpTool):
-        """Initialize the wrapper."""
         super().__init__(
             name=mcp_tool.name,
-            description=mcp_tool.description or "",
+            description=mcp_tool.description or '',
             mcp_tool=mcp_tool,
         )
         self.args_schema = self._create_args_schema(mcp_tool)
@@ -113,90 +164,344 @@ class McpToolWrapper(BaseTool):
     def _create_args_schema(self, mcp_tool: McpTool) -> type[BaseModel]:
         """Create Pydantic model from JSON schema."""
         schema = mcp_tool.raw_mcp_tool.inputSchema
-        if not schema or "properties" not in schema:
-            return create_model(f"{mcp_tool.name}Model")
-            
+        if not schema or 'properties' not in schema:
+            return create_model(f'{mcp_tool.name}Model')
+
         fields = {}
-        required = set(schema.get("required", []))
-        
+        required = set(schema.get('required', []))
+
         type_mapping = {
-            "string": str,
-            "integer": int,
-            "number": float,
-            "boolean": bool,
-            "array": list,
-            "object": dict,
-            "null": type(None),
+            'string': str,
+            'integer': int,
+            'number': float,
+            'boolean': bool,
+            'array': list,
+            'object': dict,
+            'null': type(None),
         }
 
-        for prop_name, prop_def in schema["properties"].items():
-            prop_type = type_mapping.get(prop_def.get("type"), Any)
-            # Handle simple description
+        for prop_name, prop_def in schema['properties'].items():
+            prop_type = type_mapping.get(prop_def.get('type'), Any)
             field_info = {}
-            if "description" in prop_def:
-                field_info["description"] = prop_def["description"]
-            
-            is_required = prop_name in required
-            if is_required:
+            if 'description' in prop_def:
+                field_info['description'] = prop_def['description']
+
+            if prop_name in required:
                 fields[prop_name] = (prop_type, Field(**field_info))
             else:
-                fields[prop_name] = (prop_type | None, Field(default=None, **field_info))
-                
-        return create_model(f"{mcp_tool.name}Model", **fields)
+                fields[prop_name] = (
+                    prop_type | None,
+                    Field(default=None, **field_info),
+                )
+
+        return create_model(f'{mcp_tool.name}Model', **fields)
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:
-        """Run tool synchronously - not implemented for async MCP."""
-        raise NotImplementedError("MCP tools must be run asynchronously")
+        raise NotImplementedError('MCP tools must be run asynchronously')
+
+    def _emit_tool_event(self, payload: dict[str, Any]) -> None:
+        try:
+            writer = get_stream_writer()
+        except RuntimeError:
+            return
+        writer(payload)
 
     async def _arun(self, *args: Any, **kwargs: Any) -> Any:
-        """Run tool asynchronously."""
-        # Remove None values so we don't send explicit nulls for optional parameters
-        # which can cause validation errors on the MCP server side
-        clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
-        return await self.mcp_tool.run_async(args=clean_kwargs, tool_context=None)
+        clean_kwargs = {
+            key: value for key, value in kwargs.items() if value is not None
+        }
+        self._emit_tool_event(
+            {
+                'event': 'tool_started',
+                'tool_name': self.name,
+                'tool_args': clean_kwargs,
+            }
+        )
+
+        try:
+            result = await self.mcp_tool.run_async(
+                args=clean_kwargs,
+                tool_context=None,
+            )
+        except Exception as exc:
+            self._emit_tool_event(
+                {
+                    'event': 'tool_failed',
+                    'tool_name': self.name,
+                    'tool_args': clean_kwargs,
+                    'error_type': type(exc).__name__,
+                    'error_message': _truncate_text(
+                        str(exc),
+                        limit=MAX_TOOL_RESULT_PREVIEW_LENGTH,
+                    ),
+                }
+            )
+            raise
+
+        self._emit_tool_event(
+            {
+                'event': 'tool_finished',
+                'tool_name': self.name,
+                'tool_args': clean_kwargs,
+                'result_preview': _preview_json(
+                    result,
+                    limit=MAX_TOOL_RESULT_PREVIEW_LENGTH,
+                ),
+            }
+        )
+        return result
 
 
 class AnalysisAgent:
-    """Analysis Agent - a specialized assistant for currency conversions."""
+    """Analysis Agent for system analysis and research tasks."""
 
     FORMAT_INSTRUCTION = (
-        'Set response status to input_required if the user needs to provide more information to complete the request.'
-        'Set response status to error if there is an error while processing the request.'
+        'Set response status to input_required if the user needs to provide more '
+        'information to complete the request. '
+        'Set response status to error if there is an error while processing the request. '
         'Set response status to completed if the request is complete.'
     )
 
-    def __init__(self):
-        self.model = None
-        self.tools = []
+    SUPPORTED_CONTENT_TYPES = ['text']
+
+    def __init__(self) -> None:
+        self.model: ChatOpenAI | None = None
+        self.tools: list[BaseTool] = []
         self.graph = None
-        self.runtime_config = None
-        self.config_fingerprint = None
-        self.toolsets = []
-        self._stale_toolsets = []
+        self.runtime_config: AgentRuntimeConfig | None = None
+        self.config_fingerprint: str | None = None
+        self.toolsets: list[McpToolset] = []
+        self._stale_toolsets: list[McpToolset] = []
         self._active_streams = 0
         self._init_lock = asyncio.Lock()
         self._sync_http_client = httpx.Client(verify=SSL_VERIFY)
         self._async_http_client = httpx.AsyncClient(verify=SSL_VERIFY)
-        self._refresh_task = None
-        self._refresh_stop_event = None
+        self._refresh_task: asyncio.Task[None] | None = None
+        self._refresh_stop_event: asyncio.Event | None = None
+        self._langfuse_initialized = False
+        self.langfuse_enabled = False
+        self.langfuse = None
+        self.langfuse_handler = None
+        self._last_prompt_source = 'local_default'
 
-    async def initialize(self):
+    def _initialize_langfuse(self) -> None:
+        if self._langfuse_initialized:
+            return
+
+        self._langfuse_initialized = True
+        if not _langfuse_requested():
+            logger.info(
+                'Langfuse is disabled because credentials are not configured.'
+            )
+            return
+
+        try:
+            from langfuse import get_client
+            from langfuse.langchain import CallbackHandler
+        except Exception as exc:
+            logger.exception(
+                'Failed to import Langfuse. Continuing without tracing: %s',
+                exc,
+            )
+            return
+
+        try:
+            client = get_client()
+            if not client.auth_check():
+                logger.warning(
+                    'Langfuse credentials are configured, but authentication failed. '
+                    'Continuing without tracing.'
+                )
+                return
+            self.langfuse = client
+            self.langfuse_handler = CallbackHandler()
+            self.langfuse_enabled = True
+            logger.info('Langfuse is authenticated and ready.')
+        except Exception as exc:
+            logger.exception(
+                'Failed to initialize Langfuse. Continuing without tracing: %s',
+                exc,
+            )
+
+    def _stream_item(
+        self,
+        content: str,
+        *,
+        task_state: Literal[
+            'working',
+            'completed',
+            'input_required',
+            'failed',
+        ] = 'working',
+        metadata: dict[str, Any] | None = None,
+        truncate_content: bool = True,
+    ) -> AgentStreamItem:
+        if truncate_content:
+            message = _truncate_text(content, limit=MAX_STATUS_TEXT_LENGTH)
+        else:
+            message = content
+        normalized_metadata = dict(metadata or {})
+        return {
+            'content': message,
+            'task_state': task_state,
+            'is_task_complete': task_state == 'completed',
+            'require_user_input': task_state == 'input_required',
+            'metadata': normalized_metadata,
+        }
+
+    def _load_runtime_config(self) -> AgentRuntimeConfig:
+        self._initialize_langfuse()
+        if self.langfuse_enabled and self.langfuse is not None:
+            try:
+                prompt = self.langfuse.get_prompt(AGENT_SETTINGS, label='latest')
+                self._last_prompt_source = 'langfuse'
+                return AgentRuntimeConfig(
+                    prompt=expand_env_vars(prompt.prompt),
+                    config=expand_env_vars(prompt.config or {}),
+                )
+            except Exception:
+                if self.runtime_config is not None:
+                    logger.exception(
+                        "Failed to load Langfuse prompt '%s'. Reusing the last applied configuration.",
+                        AGENT_SETTINGS,
+                    )
+                    return self.runtime_config
+                logger.exception(
+                    "Failed to load Langfuse prompt '%s'. Falling back to local config.",
+                    AGENT_SETTINGS,
+                )
+
+        with open(
+            os.path.join(os.path.dirname(__file__), 'default_config.json'),
+            encoding='utf-8',
+        ) as config_file:
+            agent_config = json.load(config_file)
+
+        self._last_prompt_source = 'local_default'
+        return AgentRuntimeConfig(
+            prompt=expand_env_vars(agent_config['prompt']),
+            config=expand_env_vars(agent_config.get('config') or {}),
+        )
+
+    async def _load_server_tools(
+        self,
+        server_config: McpServerConfig,
+    ) -> tuple[McpToolset, list[McpTool], list[BaseTool]]:
+        toolset = McpToolset(
+            connection_params=server_config.build_connection_params(),
+            tool_name_prefix=server_config.tool_name_prefix,
+        )
+        raw_tools = await toolset.get_tools()
+        filtered_tools = self._filter_tools(raw_tools, server_config)
+        wrapped_tools = [McpToolWrapper(tool) for tool in filtered_tools]
+        return toolset, raw_tools, wrapped_tools
+
+    async def initialize(self) -> list[AgentStreamItem]:
         async with self._init_lock:
+            if self.graph is not None and self.config_fingerprint is None:
+                return []
+
             runtime_config = self._load_runtime_config()
             config_fingerprint = json.dumps(
-                runtime_config.model_dump(mode="json", exclude_none=True),
+                runtime_config.model_dump(mode='json', exclude_none=True),
                 sort_keys=True,
             )
-            if self.graph is not None and self.config_fingerprint == config_fingerprint:
-                return
-            if self.graph is None:
-                logger.info("Initializing agent settings.")
-            else:
-                logger.info("Detected updated agent settings. Applying hot reload.")
+            if (
+                self.graph is not None
+                and self.config_fingerprint == config_fingerprint
+            ):
+                return []
 
-            new_toolsets = []
+            events: list[AgentStreamItem] = []
+            if self.graph is None:
+                events.append(
+                    self._stream_item(
+                        'Initializing agent runtime...',
+                        metadata={'phase': 'initializing'},
+                    )
+                )
+            else:
+                events.append(
+                    self._stream_item(
+                        'Detected updated settings. Applying hot reload...',
+                        metadata={'phase': 'reloading'},
+                    )
+                )
+
+            new_toolsets: list[McpToolset] = []
+            new_tools: list[BaseTool] = []
             try:
-                new_tools = await self._load_tools(runtime_config, new_toolsets)
+                for server_config in resolve_mcp_servers(runtime_config):
+                    server_name = server_config.resolved_name()
+                    events.append(
+                        self._stream_item(
+                            f"Connecting to {server_name} tools...",
+                            metadata={
+                                'phase': 'initializing',
+                                'tool_source': server_name,
+                            },
+                        )
+                    )
+                    try:
+                        toolset, raw_tools, wrapped_tools = (
+                            await self._load_server_tools(server_config)
+                        )
+                        if not wrapped_tools:
+                            await toolset.close()
+                            events.append(
+                                self._stream_item(
+                                    (
+                                        f'{server_name} exposed no usable tools after '
+                                        'applying filters.'
+                                    ),
+                                    metadata={
+                                        'phase': 'initializing',
+                                        'severity': 'warning',
+                                        'tool_source': server_name,
+                                        'raw_tool_count': len(raw_tools),
+                                    },
+                                )
+                            )
+                            continue
+
+                        new_toolsets.append(toolset)
+                        new_tools.extend(wrapped_tools)
+                        events.append(
+                            self._stream_item(
+                                (
+                                    f'{server_name} tools ready '
+                                    f'({len(wrapped_tools)} new tools, {len(new_tools)} total).'
+                                ),
+                                metadata={
+                                    'phase': 'initializing',
+                                    'tool_source': server_name,
+                                    'tool_count': len(wrapped_tools),
+                                    'raw_tool_count': len(raw_tools),
+                                    'total_tool_count': len(new_tools),
+                                },
+                            )
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "Failed to load tools from MCP server '%s': %s",
+                            server_name,
+                            exc,
+                        )
+                        events.append(
+                            self._stream_item(
+                                (
+                                    f'{server_name} tools are unavailable right now; '
+                                    'continuing with the remaining runtime.'
+                                ),
+                                metadata={
+                                    'phase': 'initializing',
+                                    'severity': 'warning',
+                                    'tool_source': server_name,
+                                    'warning_type': type(exc).__name__,
+                                },
+                            )
+                        )
+
                 new_model = self._create_model(runtime_config)
                 new_graph = create_react_agent(
                     new_model,
@@ -210,9 +515,21 @@ class AnalysisAgent:
                 if self.graph is None:
                     raise
                 logger.exception(
-                    "Failed to refresh agent configuration. Keeping the previous graph."
+                    'Failed to refresh agent configuration. Keeping the previous graph.'
                 )
-                return
+                events.append(
+                    self._stream_item(
+                        (
+                            'Updated settings could not be applied; continuing '
+                            'with the previous runtime.'
+                        ),
+                        metadata={
+                            'phase': 'reloading',
+                            'severity': 'warning',
+                        },
+                    )
+                )
+                return events
 
             previous_toolsets = list(self.toolsets)
             self.runtime_config = runtime_config
@@ -227,90 +544,26 @@ class AnalysisAgent:
                 self._stale_toolsets.extend(previous_toolsets)
 
             await self._maybe_close_stale_toolsets()
-
-    def _load_runtime_config(self) -> AgentRuntimeConfig:
-        langfuse_client, is_langfuse_enabled = _ensure_langfuse_client()
-        if is_langfuse_enabled and langfuse_client is not None:
-            try:
-                prompt = langfuse_client.get_prompt(AGENT_SETTINGS, label="latest")
-                return AgentRuntimeConfig(
-                    prompt=expand_env_vars(prompt.prompt),
-                    config=expand_env_vars(prompt.config or {}),
+            events.append(
+                self._stream_item(
+                    (
+                        'Agent runtime ready. '
+                        f'Prompt source: {self._last_prompt_source}. '
+                        f'Total tools available: {len(self.tools)}.'
+                    ),
+                    metadata={
+                        'phase': 'initializing',
+                        'prompt_source': self._last_prompt_source,
+                        'tool_count': len(self.tools),
+                    },
                 )
-            except Exception:
-                if self.runtime_config is not None:
-                    logger.exception(
-                        "Failed to load Langfuse prompt '%s'. Reusing the last applied configuration.",
-                        AGENT_SETTINGS,
-                    )
-                    return self.runtime_config
-                logger.exception(
-                    "Failed to load Langfuse prompt '%s'. Falling back to local default_config.json.",
-                    AGENT_SETTINGS,
-                )
-
-        with open(
-            os.path.join(os.path.dirname(__file__), 'default_config.json'),
-            encoding='utf-8',
-        ) as config_file:
-            agent_config = json.load(config_file)
-
-        return AgentRuntimeConfig(
-            prompt=expand_env_vars(agent_config['prompt']),
-            config=expand_env_vars(agent_config.get('config') or {}),
-        )
-
-    async def _load_tools(
-        self,
-        runtime_config: AgentRuntimeConfig,
-        loaded_toolsets: list[McpToolset],
-    ) -> list[BaseTool]:
-        tools: list[BaseTool] = []
-
-        for server_config in resolve_mcp_servers(runtime_config):
-            server_name = server_config.resolved_name()
-            logger.info(
-                "Connecting to MCP server '%s' via %s",
-                server_name,
-                server_config.normalized_transport(),
             )
-            try:
-                toolset = McpToolset(
-                    connection_params=server_config.build_connection_params(),
-                    tool_name_prefix=server_config.tool_name_prefix,
-                )
-                server_tools = await toolset.get_tools()
-                filtered_tools = self._filter_tools(server_tools, server_config)
-                if not filtered_tools:
-                    await toolset.close()
-                    logger.info(
-                        "Loaded 0/%s tools from MCP server '%s' after applying filters",
-                        len(server_tools),
-                        server_name,
-                    )
-                    continue
-
-                loaded_toolsets.append(toolset)
-                tools.extend(McpToolWrapper(tool) for tool in filtered_tools)
-                logger.info(
-                    "Loaded %s/%s tools from MCP server '%s'",
-                    len(filtered_tools),
-                    len(server_tools),
-                    server_name,
-                )
-            except Exception as exc:
-                logger.error(
-                    "Failed to load tools from MCP server '%s': %s",
-                    server_name,
-                    exc,
-                )
-
-        return tools
+            return events
 
     def _filter_tools(
         self,
         server_tools: list[McpTool],
-        server_config,
+        server_config: McpServerConfig,
     ) -> list[McpTool]:
         filtered_tools = []
         skipped_tool_names = []
@@ -327,7 +580,7 @@ class AnalysisAgent:
                 "Filtered out %s tool(s) from MCP server '%s': %s",
                 len(skipped_tool_names),
                 server_config.resolved_name(),
-                ", ".join(sorted(skipped_tool_names)),
+                ', '.join(sorted(skipped_tool_names)),
             )
 
         return filtered_tools
@@ -354,13 +607,13 @@ class AnalysisAgent:
             parsed_headers = json.loads(raw_headers)
         except json.JSONDecodeError:
             logger.warning(
-                "DEFAULT_HEADERS is not valid JSON. Ignoring the value."
+                'DEFAULT_HEADERS is not valid JSON. Ignoring the value.'
             )
             return {}
 
         if not isinstance(parsed_headers, dict):
             logger.warning(
-                "DEFAULT_HEADERS must be a JSON object. Ignoring the value."
+                'DEFAULT_HEADERS must be a JSON object. Ignoring the value.'
             )
             return {}
 
@@ -375,8 +628,9 @@ class AnalysisAgent:
         )
         if duplicates:
             logger.warning(
-                "Duplicate MCP tool names detected: %s. Consider setting tool_name_prefix in the Langfuse MCP config.",
-                ", ".join(duplicates),
+                'Duplicate MCP tool names detected: %s. '
+                'Consider setting tool_name_prefix in the Langfuse MCP config.',
+                ', '.join(duplicates),
             )
 
     async def _maybe_close_stale_toolsets(self) -> None:
@@ -392,7 +646,7 @@ class AnalysisAgent:
             try:
                 await toolset.close()
             except Exception:
-                logger.exception("Failed to close an MCP toolset cleanly")
+                logger.exception('Failed to close an MCP toolset cleanly')
 
     def get_refresh_interval_seconds(self) -> float:
         raw_value = os.getenv('AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS', '30')
@@ -400,14 +654,16 @@ class AnalysisAgent:
             interval_seconds = float(raw_value)
         except ValueError:
             logger.warning(
-                "AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS=%r is invalid. Falling back to 30 seconds.",
+                'AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS=%r is invalid. '
+                'Falling back to 30 seconds.',
                 raw_value,
             )
             return 30.0
 
         if interval_seconds < 0:
             logger.warning(
-                "AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS=%s is negative. Disabling automatic refresh.",
+                'AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS=%s is negative. '
+                'Disabling automatic refresh.',
                 raw_value,
             )
             return 0.0
@@ -424,7 +680,7 @@ class AnalysisAgent:
         await self.initialize()
 
         if interval_seconds <= 0:
-            logger.info("Automatic agent settings refresh is disabled.")
+            logger.info('Automatic agent settings refresh is disabled.')
             return
 
         if self._refresh_task is not None and not self._refresh_task.done():
@@ -436,7 +692,7 @@ class AnalysisAgent:
             name='analysis-agent-settings-refresh',
         )
         logger.info(
-            "Automatic agent settings refresh is enabled every %s seconds.",
+            'Automatic agent settings refresh is enabled every %s seconds.',
             format(interval_seconds, 'g'),
         )
 
@@ -467,7 +723,7 @@ class AnalysisAgent:
             try:
                 await self.initialize()
             except Exception:
-                logger.exception("Automatic agent settings refresh failed.")
+                logger.exception('Automatic agent settings refresh failed.')
 
     async def close(self) -> None:
         await self.stop_auto_refresh()
@@ -481,114 +737,283 @@ class AnalysisAgent:
         self.model = None
         self.tools = []
 
-    async def stream(self, query, context_id) -> AsyncIterable[dict[str, Any]]:
+    def _map_custom_event(
+        self,
+        payload: dict[str, Any],
+    ) -> list[AgentStreamItem]:
+        event = payload.get('event')
+        tool_name = str(payload.get('tool_name', 'tool'))
+        tool_args = payload.get('tool_args')
+        args_preview = (
+            _preview_json(tool_args, limit=MAX_TOOL_ARG_PREVIEW_LENGTH)
+            if tool_args
+            else ''
+        )
+
+        if event == 'tool_started':
+            content = f'Running tool {tool_name}.'
+            if args_preview:
+                content = f'{content} Arguments: {args_preview}'
+            return [
+                self._stream_item(
+                    content,
+                    metadata={
+                        'phase': 'tool_started',
+                        'tool_name': tool_name,
+                        'tool_args': tool_args or {},
+                    },
+                )
+            ]
+
+        if event == 'tool_finished':
+            result_preview = str(payload.get('result_preview', '')).strip()
+            content = f'Finished tool {tool_name}.'
+            if result_preview:
+                content = f'{content} Result preview: {result_preview}'
+            return [
+                self._stream_item(
+                    content,
+                    metadata={
+                        'phase': 'tool_finished',
+                        'tool_name': tool_name,
+                        'tool_args': tool_args or {},
+                    },
+                )
+            ]
+
+        if event == 'tool_failed':
+            error_message = str(payload.get('error_message', 'Unknown tool error'))
+            return [
+                self._stream_item(
+                    f'Tool {tool_name} failed: {error_message}',
+                    metadata={
+                        'phase': 'tool_failed',
+                        'tool_name': tool_name,
+                        'tool_args': tool_args or {},
+                        'error_type': payload.get('error_type'),
+                    },
+                )
+            ]
+
+        return []
+
+    def _map_update_event(
+        self,
+        payload: dict[str, Any],
+        *,
+        seen_message_keys: set[str],
+    ) -> list[AgentStreamItem]:
+        updates: list[AgentStreamItem] = []
+
+        for node_name, node_update in payload.items():
+            if not isinstance(node_update, dict):
+                continue
+
+            messages = node_update.get('messages')
+            if not isinstance(messages, list) or not messages:
+                continue
+
+            message = messages[-1]
+            if not isinstance(message, BaseMessage):
+                continue
+
+            key = _message_key(message)
+            if key in seen_message_keys:
+                continue
+            seen_message_keys.add(key)
+
+            if isinstance(message, AIMessage):
+                if message.tool_calls:
+                    tool_names = ', '.join(
+                        str(tool_call.get('name', 'tool'))
+                        for tool_call in message.tool_calls[:3]
+                    )
+                    if len(message.tool_calls) > 3:
+                        tool_names += ', ...'
+                    updates.append(
+                        self._stream_item(
+                            f'Planning the next action: {tool_names}.',
+                            metadata={
+                                'phase': 'planning',
+                                'node_name': node_name,
+                                'tool_call_count': len(message.tool_calls),
+                            },
+                        )
+                    )
+                elif _extract_message_text(message):
+                    updates.append(
+                        self._stream_item(
+                            'Drafting the final response...',
+                            metadata={
+                                'phase': 'finalizing',
+                                'node_name': node_name,
+                            },
+                        )
+                    )
+                continue
+
+            if isinstance(message, ToolMessage):
+                phase = 'tool_result'
+                content = 'Reviewing tool results...'
+                if message.status == 'error':
+                    phase = 'tool_result_error'
+                    content = 'A tool returned an error. Re-evaluating the plan...'
+                updates.append(
+                    self._stream_item(
+                        content,
+                        metadata={
+                            'phase': phase,
+                            'node_name': node_name,
+                            'tool_call_id': message.tool_call_id,
+                        },
+                    )
+                )
+
+        return updates
+
+    def _map_graph_chunk(
+        self,
+        chunk: dict[str, Any],
+        *,
+        seen_message_keys: set[str],
+    ) -> list[AgentStreamItem]:
+        event_type = chunk.get('type')
+        payload = chunk.get('data')
+
+        if event_type == 'custom' and isinstance(payload, dict):
+            return self._map_custom_event(payload)
+
+        if event_type == 'updates' and isinstance(payload, dict):
+            return self._map_update_event(
+                payload,
+                seen_message_keys=seen_message_keys,
+            )
+
+        return []
+
+    def _build_graph_config(self, context_id: str) -> dict[str, Any]:
+        return {
+            'configurable': {
+                'thread_id': context_id,
+            },
+            'callbacks': [self.langfuse_handler] if self.langfuse_handler else [],
+            'metadata': {
+                'langfuse_session_id': context_id,
+            },
+        }
+
+    async def stream(
+        self,
+        query: str,
+        context_id: str,
+    ) -> AsyncIterable[AgentStreamItem]:
         self._active_streams += 1
         try:
-            await self.initialize()
+            for item in await self.initialize():
+                yield item
+
             if self.graph is None:
                 raise RuntimeError('Agent graph was not initialized.')
 
-            graph = self.graph
-            langfuse_callback_handler = _get_langfuse_handler()
             inputs = {'messages': [('user', query)]}
-            config = {
-                'configurable': {
-                    'thread_id': context_id
-                },
-                "callbacks": [langfuse_callback_handler]
-                if langfuse_callback_handler is not None
-                else [],
-                "metadata": {
-                    "langfuse_session_id": context_id
-                }
-            }
+            config = self._build_graph_config(context_id)
+            seen_message_keys: set[str] = set()
 
-            async for item in graph.astream(inputs, config, stream_mode='values'):
-                message = item['messages'][-1]
-                if (
-                    isinstance(message, AIMessage)
-                    and message.tool_calls
-                    and len(message.tool_calls) > 0
+            yield self._stream_item(
+                'Reviewing the request and conversation context...',
+                metadata={'phase': 'planning', 'context_id': context_id},
+            )
+            yield self._stream_item(
+                'Sending the request to the language model...',
+                metadata={'phase': 'model_call', 'context_id': context_id},
+            )
+
+            async for chunk in self.graph.astream(
+                inputs,
+                config,
+                stream_mode=['updates', 'custom'],
+                version='v2',
+            ):
+                for item in self._map_graph_chunk(
+                    chunk,
+                    seen_message_keys=seen_message_keys,
                 ):
-                    yield {
-                        'is_task_complete': False,
-                        'require_user_input': False,
-                        'content': f"Using tool {message.tool_calls[0]['name']} with args {message.tool_calls[0]['args']}",
-                    }
-                elif isinstance(message, ToolMessage):
-                    yield {
-                        'is_task_complete': False,
-                        'require_user_input': False,
-                        'content': 'Processing tool response..',
-                    }
+                    yield item
 
-            yield self.get_agent_response(graph, config)
+            yield await self.get_agent_response(config)
         finally:
             self._active_streams -= 1
             await self._maybe_close_stale_toolsets()
 
-    def get_agent_response(self, graph, config):
-        current_state = graph.get_state(config)
-        
-        last_ai_message = ""
+    async def get_agent_response(
+        self,
+        config: dict[str, Any],
+    ) -> AgentStreamItem:
+        if self.graph is None:
+            raise RuntimeError('Agent graph was not initialized.')
+
+        current_state = await self.graph.aget_state(config)
+        last_ai_message = ''
         messages = current_state.values.get('messages', [])
-        for msg in reversed(messages):
-            if getattr(msg, 'type', '') == 'human':
+
+        for message in reversed(messages):
+            if getattr(message, 'type', '') == 'human':
                 break
-            if isinstance(msg, AIMessage) and getattr(msg, 'content', None):
-                content = msg.content
-                if isinstance(content, str):
-                    last_ai_message = content.strip()
-                elif isinstance(content, list):
-                    texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-                    if not texts:
-                        texts = [b for b in content if isinstance(b, str)]
-                    last_ai_message = " ".join(filter(None, texts)).strip()
-                
+            if isinstance(message, AIMessage):
+                last_ai_message = _extract_message_text(message)
                 if last_ai_message:
                     break
 
         structured_response = current_state.values.get('structured_response')
-        
-        final_content = ""
-        is_task_complete = False
-        require_user_input = True
+        final_content = last_ai_message
+        final_state: Literal[
+            'working',
+            'completed',
+            'input_required',
+            'failed',
+        ] = 'input_required'
 
         if structured_response and isinstance(structured_response, ResponseFormat):
-            final_content = structured_response.message
-            
-            # Combine if last_ai_message has additional meaningful content
-            if last_ai_message and last_ai_message != structured_response.message:
+            final_content = structured_response.message.strip() or last_ai_message
+            if (
+                last_ai_message
+                and last_ai_message != structured_response.message
+            ):
                 if structured_response.message in last_ai_message:
                     final_content = last_ai_message
                 elif last_ai_message in structured_response.message:
                     final_content = structured_response.message
                 else:
-                    final_content = f"{last_ai_message}\n\n{structured_response.message}"
-            
-            if structured_response.status == 'input_required':
-                is_task_complete = False
-                require_user_input = True
-            elif structured_response.status == 'error':
-                is_task_complete = False
-                require_user_input = True
-            elif structured_response.status == 'completed':
-                is_task_complete = True
-                require_user_input = False
-                
-            return {
-                'is_task_complete': is_task_complete,
-                'require_user_input': require_user_input,
-                'content': final_content,
-            }
-            
-        return {
-            'is_task_complete': False,
-            'require_user_input': True,
-            'content': last_ai_message or (
-                'We are unable to process your request at the moment. '
-                'Please try again.'
-            ),
-        }
+                    final_content = (
+                        f'{last_ai_message}\n\n{structured_response.message}'
+                    )
 
-    SUPPORTED_CONTENT_TYPES = ['text']
+            if structured_response.status == 'completed':
+                final_state = 'completed'
+            elif structured_response.status == 'error':
+                final_state = 'failed'
+            else:
+                final_state = 'input_required'
+
+            return self._stream_item(
+                final_content or 'The task finished without a response message.',
+                task_state=final_state,
+                metadata={
+                    'phase': 'final_response',
+                    'response_status': structured_response.status,
+                },
+                truncate_content=False,
+            )
+
+        fallback_message = final_content or (
+            'We could not finish the request cleanly. Please try again.'
+        )
+        return self._stream_item(
+            fallback_message,
+            task_state='input_required',
+            metadata={
+                'phase': 'final_response',
+                'response_status': 'fallback',
+            },
+            truncate_content=False,
+        )

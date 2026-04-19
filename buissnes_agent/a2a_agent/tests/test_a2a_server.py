@@ -1,14 +1,17 @@
 import unittest
 
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import grpc
 import httpx
+import openai
 
 from google.protobuf.json_format import MessageToDict
+from langchain_core.messages import AIMessage, ToolMessage
 
 from a2a.types import (
     Message,
@@ -24,18 +27,26 @@ from buissnes_agent.a2a_agent.__main__ import (
     _build_grpc_server,
     _build_request_handler,
 )
-from buissnes_agent.a2a_agent.agent import AnalysisAgent
+from buissnes_agent.a2a_agent.agent import AnalysisAgent, ResponseFormat
 from buissnes_agent.a2a_agent.agent_executor import AnalysisAgentExecutor
 
 
 class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
     @asynccontextmanager
-    async def _test_client(self, stream_items: list[dict[str, Any]]):
+    async def _test_client(
+        self,
+        stream_items: list[dict[str, Any]],
+        *,
+        stream_error: Exception | None = None,
+    ):
         async def fake_stream(
             _self: AnalysisAgent,
             query: str,
             context_id: str,
         ):
+            if stream_error is not None:
+                raise stream_error
+                yield  # pragma: no cover
             for item in stream_items:
                 yield item
 
@@ -86,7 +97,7 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
                 agent_card,
                 agent_executor,
             )
-            grpc_server, port = _build_grpc_server(
+            grpc_server, port = await _build_grpc_server(
                 request_handler=request_handler,
                 bind_host='127.0.0.1',
                 port=0,
@@ -202,6 +213,50 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             'Hello from the completed task.',
         )
 
+    async def test_rest_send_message_returns_failed_task_with_context_error(
+        self,
+    ) -> None:
+        request = httpx.Request(
+            'POST',
+            'http://testserver/v1/chat/completions',
+        )
+        response = httpx.Response(
+            400,
+            request=request,
+            json={
+                'error': {
+                    'message': (
+                        "This model's maximum context length is 16384 tokens. "
+                        'However, your request has 23425 input tokens. '
+                        'Please reduce the length of the input messages. None'
+                    ),
+                    'type': 'BadRequestError',
+                    'param': None,
+                    'code': 400,
+                }
+            },
+        )
+        stream_error = openai.BadRequestError(
+            'Error code: 400',
+            response=response,
+            body=response.json(),
+        )
+
+        async with self._test_client([], stream_error=stream_error) as client:
+            response = await client.post(
+                '/a2a/rest/message:send',
+                json=self._send_message_payload('say hello'),
+                headers={'A2A-Version': '1.0'},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['task']['status']['state'], 'TASK_STATE_FAILED')
+        message = payload['task']['status']['message']['parts'][0]['text']
+        self.assertIn('23425 input tokens', message)
+        self.assertIn('16384', message)
+        self.assertIn('fresh context', message)
+
     async def test_jsonrpc_send_message_returns_input_required_task(self) -> None:
         stream_items = [
             {
@@ -262,16 +317,8 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         shutdown_mock = AsyncMock()
 
         with (
-            patch.object(
-                AnalysisAgentExecutor,
-                'startup',
-                startup_mock,
-            ),
-            patch.object(
-                AnalysisAgentExecutor,
-                'shutdown',
-                shutdown_mock,
-            ),
+            patch.object(AnalysisAgentExecutor, 'startup', startup_mock),
+            patch.object(AnalysisAgentExecutor, 'shutdown', shutdown_mock),
         ):
             agent_card = _build_agent_card(
                 public_host='testserver',
@@ -291,6 +338,84 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
         startup_mock.assert_awaited_once()
         shutdown_mock.assert_awaited_once()
+
+    async def test_analysis_agent_stream_emits_status_updates(self) -> None:
+        class FakeGraph:
+            async def astream(
+                self,
+                inputs: dict[str, Any],
+                config: dict[str, Any],
+                stream_mode: list[str],
+                version: str,
+            ):
+                self.inputs = inputs
+                self.config = config
+                self.stream_mode = stream_mode
+                self.version = version
+
+                yield {
+                    'type': 'custom',
+                    'data': {
+                        'event': 'tool_started',
+                        'tool_name': 'search_docs',
+                        'tool_args': {'query': 'context limit'},
+                    },
+                }
+                yield {
+                    'type': 'updates',
+                    'data': {
+                        'tools': {
+                            'messages': [
+                                ToolMessage(
+                                    content='Found matching documents',
+                                    tool_call_id='call-1',
+                                )
+                            ]
+                        }
+                    },
+                }
+                yield {
+                    'type': 'updates',
+                    'data': {
+                        'agent': {
+                            'messages': [AIMessage(content='Final answer draft')]
+                        }
+                    },
+                }
+
+            async def aget_state(self, config: dict[str, Any]):
+                return SimpleNamespace(
+                    values={
+                        'messages': [AIMessage(content='Final answer draft')],
+                        'structured_response': ResponseFormat(
+                            status='completed',
+                            message='Final answer draft',
+                        ),
+                    }
+                )
+
+        agent = AnalysisAgent()
+        agent.graph = FakeGraph()
+
+        items = []
+        async for item in agent.stream('How big is the context?', 'ctx-1'):
+            items.append(item)
+
+        self.assertEqual(
+            items[0]['content'],
+            'Reviewing the request and conversation context...',
+        )
+        self.assertEqual(
+            items[1]['content'],
+            'Sending the request to the language model...',
+        )
+        self.assertIn('Running tool search_docs.', items[2]['content'])
+        self.assertEqual(items[3]['content'], 'Reviewing tool results...')
+        self.assertEqual(items[4]['content'], 'Drafting the final response...')
+        self.assertEqual(items[-1]['task_state'], 'completed')
+        self.assertEqual(items[-1]['content'], 'Final answer draft')
+        self.assertEqual(agent.graph.stream_mode, ['updates', 'custom'])
+        self.assertEqual(agent.graph.version, 'v2')
 
 
 if __name__ == '__main__':
