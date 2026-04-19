@@ -24,6 +24,7 @@ except ImportError:
 # ===========================
 
 logger = logging.getLogger(__name__)
+DEFAULT_VECTOR_AMOUNT_RAG = 10
 
 # ==============================================================================
 # ZASOBY GLOBALNE (SINGLETONY)
@@ -117,6 +118,44 @@ def _measure_search_time(client, collection_name: str, query_vector: list, top_k
     return search_response, latency_ms
 
 
+def resolve_top_k(top_k: int | None = None) -> int:
+    """
+    Resolve the effective retrieval limit.
+
+    Explicit top_k takes precedence. When it is not provided, the function
+    falls back to VECTOR_AMOUNT_RAG from the environment and then to the code
+    default.
+    """
+    if top_k is not None:
+        if top_k <= 0:
+            raise ValueError("top_k must be a positive integer when provided.")
+        return top_k
+
+    env_value = (os.getenv("VECTOR_AMOUNT_RAG") or "").strip()
+    if not env_value:
+        return DEFAULT_VECTOR_AMOUNT_RAG
+
+    try:
+        resolved_top_k = int(env_value)
+    except ValueError:
+        logger.warning(
+            "Invalid VECTOR_AMOUNT_RAG=%r. Falling back to %s.",
+            env_value,
+            DEFAULT_VECTOR_AMOUNT_RAG,
+        )
+        return DEFAULT_VECTOR_AMOUNT_RAG
+
+    if resolved_top_k <= 0:
+        logger.warning(
+            "Non-positive VECTOR_AMOUNT_RAG=%r. Falling back to %s.",
+            env_value,
+            DEFAULT_VECTOR_AMOUNT_RAG,
+        )
+        return DEFAULT_VECTOR_AMOUNT_RAG
+
+    return resolved_top_k
+
+
 def _format_search_results(points) -> str:
     """
     Formatuje wyniki wyszukiwania do czytelnego tekstu
@@ -169,7 +208,8 @@ def _format_search_results(points) -> str:
 
 def run_generic_rag_with_metrics(
         query: str,
-        collection_name: str
+        collection_name: str,
+        top_k: int | None = None,
 ) -> Tuple[str, Optional[RetrievalMetrics]]:
     """
     RAG z pełnymi metrykami retrieval (jeśli włączone w ENV)
@@ -185,7 +225,7 @@ def run_generic_rag_with_metrics(
     # Start timer dla całego procesu
     total_start = time.time()
 
-    top_k = int(os.getenv("VECTOR_AMOUNT_RAG", "10"))
+    top_k = resolve_top_k(top_k)
 
     # ===== OBSŁUGA BŁĘDÓW INICJALIZACJI =====
     try:
@@ -299,12 +339,20 @@ def run_generic_rag_with_metrics(
 # BACKWARD COMPATIBILITY: Stara funkcja bez metryk
 # ==============================================================================
 
-def run_generic_rag(query: str, collection_name: str) -> str:
+def run_generic_rag(
+    query: str,
+    collection_name: str,
+    top_k: int | None = None,
+) -> str:
     """
     Oryginalna funkcja bez metryk (dla backward compatibility)
 
     Używa wewnętrznie run_generic_rag_with_metrics, ale zwraca tylko wynik.
     Metryki są nadal zbierane w tle (jeśli ENABLE_RAG_METRICS=true).
     """
-    result, _ = run_generic_rag_with_metrics(query, collection_name)
+    result, _ = run_generic_rag_with_metrics(
+        query,
+        collection_name,
+        top_k=top_k,
+    )
     return result

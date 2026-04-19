@@ -19,18 +19,24 @@ GENERIC_RAG_TOOL_DESCRIPTION_ENV_VAR = "KNOWLEDGE_BASE_RAG_TOOL_DESCRIPTION"
 DEFAULT_GENERIC_RAG_TOOL_DESCRIPTION = (
     "Retrieve relevant chunks from a Qdrant knowledge-base collection for a "
     "simple RAG workflow. Provide the user's query and the target "
-    "collection_name. Use this tool when you need raw supporting passages "
-    "with metadata. The tool does not answer the question for you; it returns "
-    "retrieved chunks and metadata so you can decide what to do next."
+    "collection_name. Optionally provide top_k to override how many chunks "
+    "should be returned for this call. Use this tool when you need raw "
+    "supporting passages with metadata. The tool does not answer the question "
+    "for you; it returns retrieved chunks and metadata so you can decide what "
+    "to do next."
 )
 
-RunGenericRag = Callable[[str, str], str]
+RunGenericRag = Callable[[str, str, int | None], str]
 
 
-def _default_run_generic_rag(query: str, collection_name: str) -> str:
+def _default_run_generic_rag(
+    query: str,
+    collection_name: str,
+    top_k: int | None = None,
+) -> str:
     from buissnes_agent.tools.tool_iso_rag import run_generic_rag
 
-    return run_generic_rag(query, collection_name)
+    return run_generic_rag(query, collection_name, top_k=top_k)
 
 
 def resolve_generic_rag_tool_description() -> str:
@@ -50,11 +56,17 @@ def _normalize_collection_name(collection_name: str) -> str:
 async def run_generic_collection_rag(
     query: str,
     collection_name: str,
+    top_k: int | None = None,
     *,
     run_rag: RunGenericRag = _default_run_generic_rag,
 ) -> str:
     normalized_collection_name = _normalize_collection_name(collection_name)
-    return await asyncio.to_thread(run_rag, query, normalized_collection_name)
+    return await asyncio.to_thread(
+        run_rag,
+        query,
+        normalized_collection_name,
+        top_k,
+    )
 
 
 def create_mcp_server(
@@ -65,12 +77,17 @@ def create_mcp_server(
     mcp = FastMCP(server_name)
 
     @mcp.tool(description=resolve_generic_rag_tool_description())
-    async def query_knowledge_base(query: str, collection_name: str) -> str:
+    async def query_knowledge_base(
+        query: str,
+        collection_name: str,
+        top_k: int | None = None,
+    ) -> str:
         """Retrieve chunks from a selected Qdrant collection."""
 
         return await run_generic_collection_rag(
             query,
             collection_name,
+            top_k,
             run_rag=run_rag,
         )
 
