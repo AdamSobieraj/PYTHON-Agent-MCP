@@ -1226,15 +1226,6 @@ class AnalysisAgent:
                 )
                 seen_message_keys: set[str] = set()
 
-                yield self._stream_item(
-                    'Reviewing the request and conversation context...',
-                    metadata={'phase': 'planning', 'context_id': context_id},
-                )
-                yield self._stream_item(
-                    'Sending the request to the language model...',
-                    metadata={'phase': 'model_call', 'context_id': context_id},
-                )
-
                 async for chunk in self.graph.astream(
                     inputs,
                     config,

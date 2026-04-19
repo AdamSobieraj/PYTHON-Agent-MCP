@@ -460,17 +460,9 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         async for item in agent.stream('How big is the context?', 'ctx-1'):
             items.append(item)
 
-        self.assertEqual(
-            items[0]['content'],
-            'Reviewing the request and conversation context...',
-        )
-        self.assertEqual(
-            items[1]['content'],
-            'Sending the request to the language model...',
-        )
-        self.assertIn('Running tool search_docs.', items[2]['content'])
-        self.assertEqual(items[3]['content'], 'Reviewing tool results...')
-        self.assertEqual(items[4]['content'], 'Drafting the final response...')
+        self.assertIn('Running tool search_docs.', items[0]['content'])
+        self.assertEqual(items[1]['content'], 'Reviewing tool results...')
+        self.assertEqual(items[2]['content'], 'Drafting the final response...')
         self.assertEqual(items[-1]['task_state'], 'completed')
         self.assertEqual(items[-1]['content'], 'Final answer draft')
         self.assertEqual(items[-1]['status_message'], 'Final answer draft')
