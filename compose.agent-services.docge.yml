@@ -1,0 +1,97 @@
+name: agent-runtime
+
+x-agent-image: &agent-image
+  image: ${AGENT_IMAGE:-registry.home.arpa/executeit/python-agent-mcp:latest}
+  pull_policy: always
+
+x-runtime-env: &runtime-env
+  S3_ENDPOINT: ${S3_ENDPOINT_CONTAINER:-http://host.docker.internal:9000}
+  QDRANT_API: ${QDRANT_API_CONTAINER:-http://host.docker.internal:6333}
+  EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL_CONTAINER:-http://vllm-gpu-host:8000/v1/embeddings}
+  CHAT_BASE_URL: ${CHAT_BASE_URL_CONTAINER:-http://vllm-gpu-host:8001/v1}
+  ATLASSIAN_MCP_URL: ${ATLASSIAN_MCP_URL_CONTAINER:-http://host.docker.internal:9002/mcp/}
+  LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL_CONTAINER:-http://host.docker.internal:3000}
+  METRICS_DB_HOST: ${METRICS_DB_HOST_CONTAINER:-host.docker.internal}
+
+x-runtime-service: &runtime-service
+  <<: *agent-image
+  env_file:
+    - path: ../_shared/common.env
+      required: false
+    - path: ${AGENT_ENV_FILE:-.env}
+      required: false
+  restart: unless-stopped
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  networks:
+    - agent-runtime
+
+services:
+  agent-mcp:
+    <<: *runtime-service
+    environment:
+      <<: *runtime-env
+      DATA_SOURCE: ${DATA_SOURCE:-s3}
+    command:
+      - python
+      - -m
+      - buissnes_agent.mcp_server
+      - --transport
+      - http
+      - --port
+      - "9000"
+      - --host
+      - 0.0.0.0
+    ports:
+      - "${AGENT_MCP_PORT:-8011}:9000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import socket; s = socket.create_connection(("127.0.0.1", 9000), timeout=5); s.close()
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  agent:
+    <<: *runtime-service
+    depends_on:
+      agent-mcp:
+        condition: service_healthy
+    environment:
+      <<: *runtime-env
+      INTERNAL_MCP_URL: ${INTERNAL_MCP_URL_CONTAINER:-http://agent-mcp:9000/mcp}
+      A2A_AGENT_HOST: ${A2A_AGENT_HOST_PUBLIC:-localhost}
+      AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS: ${AGENT_SETTINGS_REFRESH_INTERVAL_SECONDS:-30}
+    command:
+      - python
+      - -m
+      - buissnes_agent.a2a_agent
+      - --host
+      - 0.0.0.0
+      - --port
+      - "${A2A_HTTP_PORT:-10004}"
+      - --grpc-port
+      - "${A2A_GRPC_PORT:-10005}"
+      - --compat-grpc-port
+      - "${A2A_COMPAT_GRPC_PORT:-10006}"
+    ports:
+      - "${A2A_HTTP_PORT:-10004}:${A2A_HTTP_PORT:-10004}"
+      - "${A2A_GRPC_PORT:-10005}:${A2A_GRPC_PORT:-10005}"
+      - "${A2A_COMPAT_GRPC_PORT:-10006}:${A2A_COMPAT_GRPC_PORT:-10006}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:${A2A_HTTP_PORT:-10004}/.well-known/agent-card.json", timeout=5)
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+
+networks:
+  agent-runtime:
+    driver: bridge
