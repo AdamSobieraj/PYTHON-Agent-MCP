@@ -280,7 +280,7 @@ def run_generic_rag_with_metrics(
 
         # KROK 3: Obsługa pustych wyników
         if not points:
-            no_results_msg = "Nie znaleziono relewantnych dokumentów w bazie wiedzy ISO 20022."
+            no_results_msg = "Nie znaleziono relewantnych dokumentów w bazie"
             total_latency = MetricsCalculator.calculate_latency_ms(total_start)
 
             empty_metrics = None
