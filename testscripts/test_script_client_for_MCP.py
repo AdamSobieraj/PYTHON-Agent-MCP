@@ -8,6 +8,7 @@ from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
+from pydantic import BaseModel, Field
 
 # Biblioteki MCP
 from mcp import ClientSession, StdioServerParameters
@@ -26,6 +27,7 @@ SERVER_SCRIPT_PATH = os.path.join(BASE_DIR, "../buissnes_agent/MCPServer.py")
 LLM_BASE_URL = os.getenv("CHAT_BASE_URL")
 LLM_API_KEY = os.getenv("CHAT_API_KEY")
 LLM_MODEL = os.getenv("CHAT_MODEL")
+
 
 # ==============================================================================
 # SECURITY PROMPT
@@ -66,34 +68,62 @@ Musisz działać jak inteligentny router, wybierając odpowiednie narzędzie do 
 
 DOSTĘPNE NARZĘDZIA I ICH PRZEZNACZENIE:
 
-1. 'query_iso20022_knowledge_base' (BAZA GLOBALNA - TWARDA WIEDZA)
-   - Użyj do: Pytań o oficjalną specyfikację ISO 20022, strukturę XML, tagi, atrybuty, typy danych, reguły walidacji, standardy CBPR+.
-   - Przykłady: "Jakie są pola w pacs.008?", "Co oznacza kod błędu AM09?", "Struktura bloku GrpHdr".
-   - NIE używaj do: Pytań o to, jak my to wdrażamy w firmie.
+1. 'query_knowledge_base' (BAZA WIEDZY QDRANT)
+   - Parametry: query (pytanie), collection_name (nazwa kolekcji), top_k (liczba wyników, opcjonalne)
+   - Dostępne kolekcje: 'iso20022_specs', 'confluence_docs', 'wikipedia_general'
+   - Użyj do: Wyszukiwania w konkretnej bazie wiedzy
+   - Przykład: query="pola w pacs.008", collection_name="iso20022_specs"
 
-2. 'search_confluence_internal' (BAZA WEWNĘTRZNA - WIEDZA FIRMOWA)
-   - Użyj do: Pytań o procedury, ustalenia projektowe, specyfikę wdrożenia, notatki ze spotkań, decyzje biznesowe.
-   - Przykłady: "Jak obsługujemy camt.053 w systemie X?", "Kto jest właścicielem projektu?", "Procedura reklamacji".
-   - NIE używaj do: Ogólnych definicji, które są publicznie dostępne.
+2. 'get_s3_markdown_document' (PEŁNY DOKUMENT)
+   - Parametry: s3_uri (ścieżka do pliku)
+   - Użyj do: Pobrania pełnego dokumentu źródłowego
+   - URI otrzymasz w metadanych z query_knowledge_base
 
-3. 'search_wikipedia_general' (WIEDZA OGÓLNA - ENCYKLOPEDIA)
-   - Użyj do: Definicji pojęć biznesowych, historii, geografii, kodów krajów, informacji o organizacjach (SWIFT, FED, EBA).
-   - Przykłady: "Co to jest bank centralny?", "Historia systemu SWIFT", "Waluta Nigerii".
+3. 'get_s3_markdown_document_range' (FRAGMENT DOKUMENTU)
+   - Parametry: s3_uri, start_byte, end_byte (opcjonalny)
+   - Użyj do: Pobrania większego kontekstu
 
-INSTRUKCJA POSTĘPOWANIA (ALGORYTM DECYZYJNY):
+INSTRUKCJA POSTĘPOWANIA:
 
 KROK 1: ANALIZA INTENCJI
-- Czy użytkownik pyta o "nasz system", "procedurę", "wdrożenie"? -> Wybierz CONFLUENCE.
-- Czy użytkownik pyta o "format pola", "tag XML", "specyfikację"? -> Wybierz ISO KNOWLEDGE BASE.
-- Czy użytkownik pyta o definicję ogólną ("co to jest X")? -> Wybierz WIKIPEDIA.
-- Czy pytanie jest o pogodę/politykę/gotowanie? -> ODMÓW odpowiedzi ("Jestem asystentem bankowym...").
+- Pytanie o specyfikację ISO/XML/tagi? -> collection_name="iso20022_specs"
+- Pytanie o procedury wewnętrzne/projekt? -> collection_name="confluence_docs"
+- Pytanie ogólne/definicje/historia? -> collection_name="wikipedia_general"
+- Pytanie spoza zakresu bankowego? -> ODMÓW
 
-KROK 2: SYNTEZA ODPOWIEDZI
-- ZAWSZE cytuj źródło w odpowiedzi (np. "Zgodnie z procedurą w Confluence...", "Według specyfikacji ISO...").
-- Jeśli pytanie jest złożone (np. "Co to jest pacs.008 i jak go wdrażamy?"), możesz użyć DWÓCH narzędzi sekwencyjnie (najpierw definicja z ISO, potem wdrożenie z Confluence).
+KROK 2: WYSZUKIWANIE
+- Użyj query_knowledge_base z odpowiednią collection_name
+- Jeśli potrzebujesz więcej kontekstu -> użyj get_s3_markdown_document
 
-Pamiętaj: Jesteś profesjonalistą. Nie zgaduj. Jeśli narzędzia nie zwrócą wyniku, powiedz to wprost.
+KROK 3: ODPOWIEDŹ
+- Cytuj źródło
+- Nie wymyślaj informacji spoza kontekstu
+- Jeśli brak danych, powiedz to wprost
 """
+
+
+# ==============================================================================
+# SCHEMATY ARGUMENTÓW NARZĘDZI
+# ==============================================================================
+
+class QueryKnowledgeBaseArgs(BaseModel):
+    """Argumenty dla query_knowledge_base."""
+    query: str = Field(description="Pytanie użytkownika")
+    collection_name: str = Field(description="Nazwa kolekcji w Qdrant")
+    top_k: int | None = Field(default=None, description="Liczba wyników (opcjonalne)")
+
+
+class GetS3DocumentArgs(BaseModel):
+    """Argumenty dla get_s3_markdown_document."""
+    s3_uri: str = Field(description="Ścieżka S3, np. s3://bucket/path/file.md")
+
+
+class GetS3DocumentRangeArgs(BaseModel):
+    """Argumenty dla get_s3_markdown_document_range."""
+    s3_uri: str = Field(description="Ścieżka S3")
+    start_byte: int = Field(description="Początkowy bajt")
+    end_byte: int | None = Field(default=None, description="Końcowy bajt (opcjonalny)")
+
 
 # ==============================================================================
 # MENEDŻER SESJI (A2A PATTERN)
@@ -154,12 +184,8 @@ async def init_session(transport: str, host: str = "localhost", port: int = 8000
 async def run_chat_loop():
     print(f"Katalog roboczy: {os.getcwd()}")
 
-    # Wybór transportu: 'stdio' (lokalnie) lub 'sse' (jeśli serwer działa niezależnie)
-    # W architekturze A2A docelowo używa się 'sse', ale do devu lokalnego 'stdio' jest wygodniejsze.
-    # selected_transport = "stdio"
     selected_transport = "sse"
 
-    # Używamy context managera do obsługi połączenia (Nowość A2A)
     async with init_session(transport=selected_transport) as session:
 
         # 1. Pobranie narzędzi z serwera MCP
@@ -172,29 +198,58 @@ async def run_chat_loop():
             return
 
         # 2. Konwersja narzędzi MCP na format LangChain
+        # Mapowanie nazw narzędzi do schematów
+        tool_schemas = {
+            'query_knowledge_base': QueryKnowledgeBaseArgs,
+            'get_s3_markdown_document': GetS3DocumentArgs,
+            'get_s3_markdown_document_range': GetS3DocumentRangeArgs,
+        }
+
         langchain_tools = []
 
         for tool in mcp_tools.tools:
-            # Wrapper musi przechwycić nazwę narzędzia i sesję
-            # To pozwala LangChainowi wywołać asynchronicznie metodę call_tool w sesji MCP
-            async def _tool_wrapper(query: str, tool_name=tool.name):
-                print(f"\n[DEBUG A2A] Wywołuję narzędzie MCP: {tool_name} z query='{query}'")
+            tool_schema = tool_schemas.get(tool.name)
 
-                # Wywołanie przez sesję MCP
-                result = await session.call_tool(tool_name, arguments={"query": query})
+            if not tool_schema:
+                print(f"[UWAGA] Brak schematu dla narzędzia: {tool.name}, pomijam")
+                continue
 
-                # Obsługa błędów zwróconych przez narzędzie
-                if result.isError:
-                    return f"Tool Error: {result.content}"
+            # FIX: Wrapper musi przechwytywać tool.name przez closure
+            def make_wrapper(current_tool_name):
+                async def _tool_wrapper(**kwargs):
+                    # FIX: LangChain owija argumenty w dodatkowy 'kwargs'
+                    if len(kwargs) == 1 and 'kwargs' in kwargs:
+                        actual_args = kwargs['kwargs']
+                    else:
+                        actual_args = kwargs
 
-                return result.content[0].text
+                    print(f"\n[DEBUG A2A] Wywołuję narzędzie MCP: {current_tool_name} z args={actual_args}")
 
-            # Tworzymy StructuredTool dla LangChaina
+                    try:
+                        # Wywołanie przez sesję MCP
+                        result = await session.call_tool(current_tool_name, arguments=actual_args)
+
+                        # Obsługa błędów zwróconych przez narzędzie
+                        if result.isError:
+                            return f"Tool Error: {result.content}"
+
+                        return result.content[0].text
+
+                    except Exception as e:
+                        print(f"[BŁĄD] Wywołanie narzędzia {current_tool_name}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        return f"Exception: {str(e)}"
+
+                return _tool_wrapper
+
+            # Tworzymy StructuredTool dla LangChaina ze schematem
             lc_tool = StructuredTool.from_function(
                 func=None,
-                coroutine=_tool_wrapper,
+                coroutine=make_wrapper(tool.name),
                 name=tool.name,
                 description=tool.description or "Narzędzie MCP do bazy wiedzy",
+                args_schema=tool_schema,
             )
             langchain_tools.append(lc_tool)
 
