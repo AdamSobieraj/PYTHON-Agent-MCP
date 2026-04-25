@@ -27,6 +27,7 @@ class DataLoaderS3Service:
         self.aws_secret = os.getenv('S3_SK') or os.getenv('AWS_SECRET_ACCESS_KEY')
         self.aws_region = os.getenv('AWS_REGION') or os.getenv('S3_REGION') or "eu-north-1"
         self.s3_endpoint = os.getenv('S3_ENDPOINT')
+        self.s3_verify = self._resolve_s3_verify()
 
         if not self.aws_key or not self.aws_secret:
             raise RuntimeError("Brak poświadczeń AWS w pliku .env")
@@ -37,10 +38,19 @@ class DataLoaderS3Service:
             region_name=self.aws_region,
         )
 
+        client_kwargs: dict[str, object] = {'verify': self.s3_verify}
         if self.s3_endpoint:
-            self.s3_client = self.session.client('s3', endpoint_url=self.s3_endpoint)
-        else:
-            self.s3_client = self.session.client('s3')
+            client_kwargs['endpoint_url'] = self.s3_endpoint
+
+        self.s3_client = self.session.client('s3', **client_kwargs)
+
+    @staticmethod
+    def _resolve_s3_verify() -> bool | str:
+        explicit_bundle = os.getenv('S3_CA_BUNDLE') or os.getenv('AWS_CA_BUNDLE')
+        if explicit_bundle:
+            return explicit_bundle
+
+        return True
 
     def list_objects(self, bucket_name: str, prefix: str = "") -> Generator[str, None, None]:
         """
@@ -51,9 +61,10 @@ class DataLoaderS3Service:
         # Jeśli prefix jest pusty, to pusty string.
         prefix_arg = prefix if prefix else ""
 
-        # Pobieramy dozwolone rozszerzenia
+        # Pobieramy dozwolone rozszerzenia z settings, lub ustawiamy domyślne jeśli brak
         allowed_exts = settings.get("chunking.allowed_extensions", [])
         if not allowed_exts:
+            # Dodałem .xsd bo widziałem je w Twoich logach
             allowed_exts = ['.txt', '.md', '.pdf', '.docx', '.xlsx', '.xsd', '.xml', '.json']
 
         ext_tuple = tuple(allowed_exts)
@@ -157,27 +168,4 @@ class DataLoaderS3Service:
             return response['Body'].read()
         except Exception as e:
             logger.error(f"S3 Download Error (Bytes): {e}")
-            raise e
-
-    def upload_bytes(self, bucket_name: str, key: str, data: bytes,
-                     content_type: str = 'application/octet-stream') -> None:
-        """
-        Wgrywa bajty do S3.
-
-        Args:
-            bucket_name: Nazwa bucketa S3
-            key: Klucz (ścieżka) pliku w S3
-            data: Dane w formie bajtów
-            content_type: Typ MIME (domyślnie 'application/octet-stream')
-        """
-        try:
-            self.s3_client.put_object(
-                Bucket=bucket_name,
-                Key=key,
-                Body=data,
-                ContentType=content_type
-            )
-            logger.info(f"✓ Wgrano plik do S3: s3://{bucket_name}/{key}")
-        except Exception as e:
-            logger.error(f"S3 Upload Error: Nie udało się wgrać {key} do {bucket_name}: {e}")
             raise e

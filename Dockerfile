@@ -1,14 +1,14 @@
 # Use a Python image with uv pre-installed
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 # Install local CA certificates
-COPY localca.pem /usr/local/share/ca-certificates/localca.crt
+COPY root-ca.pem /usr/local/share/ca-certificates/localca.crt
 RUN update-ca-certificates
 
 # Set environment variables so Python libraries use the updated CA bundle
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV CERTINFO=/etc/ssl/certs/ca-certificates.crt
-
+ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # Install the project into `/app`
 WORKDIR /app
