@@ -124,7 +124,7 @@ class LangChainChunker:
 
             # C. Separacja pól znanych od "extra"
             # Definiujemy, które klucze mapujemy wprost na dataclass
-            known_keys = {"source", "title", "url", "extension", "domain", "tags", "page_number"}
+            known_keys = {"source", "title", "url", "extension", "domain", "tags", "page_number", "line_start", "line_end"}
 
             # Wyciągamy known fields
             schema_data = {k: meta_dict.get(k) for k in known_keys}
@@ -150,6 +150,9 @@ class LangChainChunker:
                 domain=schema_data["domain"],
                 tags=schema_data["tags"] or [],
                 page_number=schema_data["page_number"],
+
+                embedding_line_start=schema_data["line_start"],
+                embedding_line_end=schema_data["line_end"],
 
                 extra_data=extras
             )

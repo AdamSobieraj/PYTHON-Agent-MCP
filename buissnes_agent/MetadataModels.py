@@ -15,6 +15,14 @@ class BaseMetadata:
     tags: List[str] = field(default_factory=list)
     page_number: Optional[int] = None
 
+    # Numeracja linii w oryginalnym pliku
+    embedding_line_start: Optional[int] = None
+    embedding_line_end: Optional[int] = None
+
+    # Numeracja linii w oryginalnym pliku
+    document_line_start: Optional[int] = None
+    document_line_end: Optional[int] = None
+
     def _clean_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Pomocnicza metoda usuwająca None z wyników. Zostawia przypisane wartości, w tym page_number."""
         return {k: v for k, v in data.items() if v is not None}

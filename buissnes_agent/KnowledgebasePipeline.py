@@ -120,6 +120,9 @@ class SearchKnowledgebase:
                 if not documents_list:
                     continue
 
+                # Dodaj numerację linii przed chunkowaniem
+                self._add_line_numbers_to_documents(documents_list)
+
                 # Wzbogacamy każdą stronę o ogólne metadane pliku (jeśli loader tego nie zrobił)
                 # Choć zaktualizowane loadery już to robią, ten krok jest świetnym zabezpieczeniem.
                 for doc in documents_list:
@@ -158,7 +161,12 @@ class SearchKnowledgebase:
         if chunk_module in ["langchain"]:
             logger.info(f"LOGIC LAYER: Wybrano LangChainChunker. Strategia: {strategy}")
             chunker_engine = LangChainChunker(strategy, chunk_size, chunk_overlap)
-            return chunker_engine.process_content(documents_list)
+            processed_chunks = chunker_engine.process_content(documents_list)
+
+            # Dodaj numery linii do chunków
+            self._add_line_numbers_to_chunks(processed_chunks, documents_list)
+
+            return processed_chunks
 
         else:
             logger.info("LOGIC LAYER: Wybrano Legacy Chunker.")
@@ -171,6 +179,10 @@ class SearchKnowledgebase:
                 # doc.metadata zawiera już poprawny page_number (1, 2, 3...)
                 # doc.page_content to tekst tylko z tej konkretnej strony
                 page_chunks = chunker_engine.process_content(doc.page_content, doc.metadata)
+
+                # Dodaj numery linii dla legacy chunków
+                self._add_line_numbers_to_legacy_chunks(page_chunks, doc)
+
                 all_legacy_chunks.extend(page_chunks)
 
             return all_legacy_chunks
@@ -232,7 +244,170 @@ class SearchKnowledgebase:
 
         return int(chunk_size), int(chunk_overlap), str(strategy)
 
+    def _add_line_numbers_to_documents(self, documents_list: List[Document]) -> None:
+        """
+        Dodaje do metadanych każdej strony zakres linii w oryginalnym pliku Markdown.
+        document_line_start/end = zakres całej strony
+        """
+        current_line = 1
+
+        for doc in documents_list:
+            line_count = doc.page_content.count('\n') + 1
+
+            doc.metadata['document_line_start'] = current_line
+            doc.metadata['document_line_end'] = current_line + line_count - 1
+
+            current_line += line_count
+
+        logger.info(f"📄 Numeracja stron: {len(documents_list)} stron, łącznie {current_line - 1} linii")
 
 
+    def _calculate_chunk_line_numbers(self, chunk_text: str, original_text: str, page_line_start: int,
+                                      last_position: int = 0) -> Tuple[int, int, int]:
+        """
+        Oblicza numer linii początkowej i końcowej dla danego chunka.
 
+        Args:
+            chunk_text: Tekst chunka
+            original_text: Oryginalny tekst strony
+            page_line_start: Numer linii, od której zaczyna się cała strona
+            last_position: Ostatnia pozycja w tekście (dla śledzenia kolejnych chunków)
 
+        Returns:
+            Tuple[chunk_line_start, chunk_line_end, new_position]
+        """
+        # Znajdź pozycję chunka w oryginalnym tekście (od ostatniej pozycji)
+        chunk_position = original_text.find(chunk_text, last_position)
+
+        if chunk_position == -1:
+            # Jeśli nie znaleziono (może być zmodyfikowany przez chunker), użyj last_position
+            chunk_position = last_position
+
+        # Policz linie przed chunkiem (od początku strony)
+        text_before_chunk = original_text[:chunk_position]
+        lines_before = text_before_chunk.count('\n')
+
+        # Policz linie w samym chunku
+        lines_in_chunk = chunk_text.count('\n')
+
+        # Oblicz zakres linii
+        chunk_line_start = page_line_start + lines_before
+        chunk_line_end = chunk_line_start + lines_in_chunk
+
+        # Jeśli chunk nie kończy się znakiem nowej linii, ale ma jakąś treść, to zajmuje tę linię
+        if chunk_text and not chunk_text.endswith('\n'):
+            chunk_line_end += 1
+
+        # Nowa pozycja do śledzenia następnego chunka
+        new_position = chunk_position + len(chunk_text)
+
+        return chunk_line_start, chunk_line_end, new_position
+
+    def _add_line_numbers_to_chunks(self, chunks: List[Dict[str, Any]], documents_list: List[Document]) -> None:
+        """
+        Dodaje do każdego chunka:
+        1. document_line_start/end - zakres STRONY źródłowej (kopiowane)
+        2. embedding_line_start/end - zakres CHUNKA w oryginalnym pliku (obliczane)
+        """
+        for chunk in chunks:
+            chunk_text = chunk["text"]
+            chunk_metadata = chunk["metadata"]
+
+            chunk_page_number = chunk_metadata.get("page_number")
+
+            if chunk_page_number is None:
+                logger.warning(" Chunk bez page_number - pomijam numerację linii")
+                continue
+
+            # Znajdź stronę źródłową
+            original_doc = None
+            for doc in documents_list:
+                if doc.metadata.get("page_number") == chunk_page_number:
+                    original_doc = doc
+                    break
+
+            if original_doc is None:
+                logger.warning(f"⚠️ Nie znaleziono strony {chunk_page_number}")
+                continue
+
+            # 1. KOPIUJ zakres STRONY do chunka (document_line_*)
+            page_line_start = original_doc.metadata.get("document_line_start", 1)
+            page_line_end = original_doc.metadata.get("document_line_end", 1)
+
+            chunk_metadata["document_line_start"] = page_line_start  # ✅ Zakres całej strony
+            chunk_metadata["document_line_end"] = page_line_end  # ✅ Zakres całej strony
+
+            # 2. OBLICZ zakres CHUNKA (embedding_line_*)
+            page_text = original_doc.page_content
+            chunk_position = page_text.find(chunk_text)
+
+            if chunk_position == -1:
+                # Fallback - jeśli nie znaleziono chunka, użyj zakresu całej strony
+                logger.debug(f" Chunk nie znaleziony w tekście strony {chunk_page_number}")
+                chunk_metadata["embedding_line_start"] = page_line_start
+                chunk_metadata["embedding_line_end"] = page_line_end
+                continue
+
+            # Policz linie przed chunkiem (w obrębie strony)
+            text_before_chunk = page_text[:chunk_position]
+            lines_before = text_before_chunk.count('\n')
+
+            # Policz linie w samym chunku
+            lines_in_chunk = chunk_text.count('\n')
+
+            # Oblicz GLOBALNY zakres chunka w pliku
+            chunk_line_start = page_line_start + lines_before
+            chunk_line_end = chunk_line_start + lines_in_chunk
+
+            # Jeśli chunk ma treść i nie kończy się \n, zajmuje jeszcze jedną linię
+            if chunk_text and not chunk_text.endswith('\n'):
+                chunk_line_end += 1
+
+            chunk_metadata["embedding_line_start"] = chunk_line_start  # Zakres chunka
+            chunk_metadata["embedding_line_end"] = chunk_line_end  # akres chunka
+
+        logger.info(f"📦 Numeracja chunków: {len(chunks)} chunków przetworzonych")
+
+    def _add_line_numbers_to_legacy_chunks(self, chunks: List[Dict[str, Any]], original_doc: Document) -> None:
+        """
+        Dodaje do każdego legacy chunka:
+        1. document_line_start/end - zakres STRONY źródłowej
+        2. embedding_line_start/end - zakres CHUNKA w oryginalnym pliku
+        """
+        page_line_start = original_doc.metadata.get("document_line_start", 1)
+        page_line_end = original_doc.metadata.get("document_line_end", 1)
+        page_text = original_doc.page_content
+
+        current_position = 0
+
+        for chunk in chunks:
+            chunk_text = chunk["text"]
+            chunk_metadata = chunk["metadata"]
+
+            # 1. KOPIUJ zakres STRONY
+            chunk_metadata["document_line_start"] = page_line_start
+            chunk_metadata["document_line_end"] = page_line_end
+
+            # 2. OBLICZ zakres CHUNKA
+            chunk_position = page_text.find(chunk_text, current_position)
+
+            if chunk_position == -1:
+                chunk_position = current_position
+
+            text_before_chunk = page_text[:chunk_position]
+            lines_before = text_before_chunk.count('\n')
+
+            lines_in_chunk = chunk_text.count('\n')
+
+            chunk_line_start = page_line_start + lines_before
+            chunk_line_end = chunk_line_start + lines_in_chunk
+
+            if chunk_text and not chunk_text.endswith('\n'):
+                chunk_line_end += 1
+
+            chunk_metadata["embedding_line_start"] = chunk_line_start
+            chunk_metadata["embedding_line_end"] = chunk_line_end
+
+            current_position = chunk_position + len(chunk_text)
+
+        logger.info(f"Legacy chunków: {len(chunks)} chunków przetworzonych")

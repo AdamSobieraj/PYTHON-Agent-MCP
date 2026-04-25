@@ -56,6 +56,62 @@ class DataLoaderS3FileLoader:
         # Przekazujemy prefix do serwisu S3. AWS zwróci tylko obiekty zaczynające się od tego ciągu.
         return self.s3_service.list_objects(self.bucket_name, self.prefix)
 
+    def save_markdown_to_s3(self, s3_key: str, documents: List[Document]) -> str:
+        """
+        Zapisuje dokumenty Markdown do S3 w folderze o takiej samej nazwie jak oryginalny + '_markdown'.
+
+        Args:
+            s3_key: Klucz S3 pliku źródłowego (np. "technical/ISO20022/plik.pdf")
+            documents: Lista dokumentów z zawartością Markdown
+
+        Returns:
+            Klucz S3 zapisanego pliku Markdown (ścieżka w S3)
+        """
+        # Pobierz nazwę pliku bez rozszerzenia
+        filename_without_ext = os.path.splitext(os.path.basename(s3_key))[0]
+
+        # Pobierz ścieżkę folderów z klucza S3
+        s3_dir = os.path.dirname(s3_key)
+
+        # Dodaj suffix '_markdown' do struktury folderów
+        if s3_dir:
+            # Jeśli jest struktura folderów, dodaj '_markdown' na końcu
+            markdown_dir = s3_dir + "_markdown"
+        else:
+            # Jeśli plik był w głównym katalogu bucketa
+            markdown_dir = "root_markdown"
+
+        # Ścieżka do pliku Markdown w S3
+        markdown_filename = f"{filename_without_ext}.md"
+        markdown_s3_key = f"{markdown_dir}/{markdown_filename}"
+
+        # Połącz wszystkie dokumenty w jeden string Markdown
+        markdown_content = []
+        for i, doc in enumerate(documents):
+            if i > 0:
+                markdown_content.append("\n\n---\n\n")  # Separator między stronami/sekcjami
+            markdown_content.append(doc.page_content)
+
+        full_markdown = "".join(markdown_content)
+
+        # Zapisz do S3
+        try:
+            markdown_bytes = full_markdown.encode('utf-8')
+            self.s3_service.upload_bytes(
+                bucket_name=self.bucket_name,
+                key=markdown_s3_key,
+                data=markdown_bytes,
+                content_type='text/markdown'
+            )
+
+            s3_url = f"s3://{self.bucket_name}/{markdown_s3_key}"
+            logger.info(f"✓ Zapisano Markdown do S3: {s3_url}")
+            return s3_url
+
+        except Exception as e:
+            logger.error(f"Błąd podczas zapisywania Markdown do S3: {e}")
+            raise
+
     def load_file_with_metadata(self, s3_key: str) -> Tuple[List[Document], Dict[str, Any]]:
         filename = os.path.basename(s3_key)
         ext = os.path.splitext(s3_key)[1].lower()
@@ -101,6 +157,18 @@ class DataLoaderS3FileLoader:
                 merged_meta = base_metadata.copy()
                 merged_meta.update(doc.metadata)
                 doc.metadata = merged_meta
+
+            # 6. Zapisz Markdown do S3 i dodaj ścieżkę do metadanych
+            if documents:
+                markdown_s3_path = self.save_markdown_to_s3(s3_key, documents)
+                # Dodaj ścieżkę do Markdown w metadanych
+                base_metadata['markdown_path'] = markdown_s3_path
+                base_metadata[
+                    'markdown_url'] = f"https://{self.bucket_name}.s3.amazonaws.com/{markdown_s3_path.replace('s3://' + self.bucket_name + '/', '')}"
+
+                for doc in documents:
+                    doc.metadata['markdown_path'] = markdown_s3_path
+                    doc.metadata['markdown_url'] = base_metadata['markdown_url']
 
             return documents, base_metadata
 

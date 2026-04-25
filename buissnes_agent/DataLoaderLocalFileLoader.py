@@ -29,6 +29,10 @@ class DataLoaderLocalFileLoader:
 
     def __init__(self, directory: str):
         self.directory = os.path.abspath(directory)
+
+        # Katalog docelowy dla plików Markdown
+        self.markdown_directory = self.directory + "_markdown"
+
         # Inicjalizacja parserów i mapowanie rozszerzeń
         self.parsers: Dict[str, BaseDocumentParser] = {
             ".xlsx": XlsxParser(),
@@ -38,6 +42,51 @@ class DataLoaderLocalFileLoader:
         }
         # Domyślny parser (obsłuży txt, json, xml, md itp.)
         self.default_parser = TextParser()
+
+    def _get_markdown_path(self, original_file_path: str) -> str:
+        """
+        Tworzy ścieżkę do pliku markdown na podstawie oryginalnej ścieżki.
+        Np. /dane/HR/dokument.pdf -> /dane_markdown/HR/dokument.md
+        """
+        # Pobierz ścieżkę względną względem głównego katalogu
+        rel_path = os.path.relpath(original_file_path, self.directory)
+
+        # Zmień rozszerzenie na .md
+        base_name = os.path.splitext(rel_path)[0]
+        markdown_rel_path = base_name + ".md"
+
+        # Połącz z katalogiem docelowym
+        markdown_full_path = os.path.join(self.markdown_directory, markdown_rel_path)
+
+        return markdown_full_path
+
+    def _save_markdown(self, documents: List[Document], markdown_path: str) -> None:
+        """
+        Zapisuje zawartość Markdown do pliku.
+        Łączy wszystkie dokumenty z listy w jeden plik.
+        """
+        # Utwórz katalog, jeśli nie istnieje
+        os.makedirs(os.path.dirname(markdown_path), exist_ok=True)
+
+        # Połącz wszystkie dokumenty w jeden Markdown
+        # Jeśli jest wiele stron/sekcji, rozdziel je separatorem
+        markdown_content = []
+        for i, doc in enumerate(documents):
+            if i > 0:
+                # Dodaj separator między dokumentami/stronami
+                markdown_content.append("\n\n---\n\n")
+
+            # Dodaj informację o stronie, jeśli istnieje
+            if doc.metadata.get('page_number'):
+                markdown_content.append(f"<!-- Page {doc.metadata['page_number']} -->\n\n")
+
+            markdown_content.append(doc.page_content)
+
+        # Zapisz plik
+        with open(markdown_path, 'w', encoding='utf-8') as f:
+            f.write(''.join(markdown_content))
+
+        logger.info(f"Zapisano Markdown: {markdown_path}")
 
     def list_objects(self) -> Generator[str, None, None]:
 
@@ -82,7 +131,17 @@ class DataLoaderLocalFileLoader:
             # 3. Parsowanie pliku na Markdown (przekazujemy 'ext' dla TextParsera)
             documents = parser.parse(file_path, ext=ext)
 
-            # 4. Wzbogacanie o globalne metadane
+            # 4. Generowanie ścieżki dla pliku Markdown
+            markdown_path = self._get_markdown_path(file_path)
+
+            # 5. Zapis pliku Markdown
+            if documents:
+                self._save_markdown(documents, markdown_path)
+
+            # 6. Dodanie ścieżki markdown do bazowych metadanych
+            base_metadata['markdown_path'] = markdown_path
+
+            # 6. Wzbogacanie o globalne metadane
             for doc in documents:
                 # Kopiujemy bazowe metadane pliku
                 merged_meta = base_metadata.copy()
