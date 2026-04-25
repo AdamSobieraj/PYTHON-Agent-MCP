@@ -25,7 +25,8 @@ def view_entries(limit: int = 5):
     # 1. Pobieranie konfiguracji z .env
     qdrant_url = os.getenv("QDRANT_API")
     qdrant_key = os.getenv("QDRANT_API_KEY")
-    collection_name = settings.get("vector_db.collection_name")
+    # collection_name = settings.get("vector_db.collection_name")
+    collection_name = "my_custom_collection_v2"
 
     if not qdrant_url:
         logger.error("Brak QDRANT_API w pliku .env")

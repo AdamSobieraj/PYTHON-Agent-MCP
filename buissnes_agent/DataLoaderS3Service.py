@@ -51,10 +51,9 @@ class DataLoaderS3Service:
         # Jeśli prefix jest pusty, to pusty string.
         prefix_arg = prefix if prefix else ""
 
-        # Pobieramy dozwolone rozszerzenia z settings, lub ustawiamy domyślne jeśli brak
+        # Pobieramy dozwolone rozszerzenia
         allowed_exts = settings.get("chunking.allowed_extensions", [])
         if not allowed_exts:
-            # Dodałem .xsd bo widziałem je w Twoich logach
             allowed_exts = ['.txt', '.md', '.pdf', '.docx', '.xlsx', '.xsd', '.xml', '.json']
 
         ext_tuple = tuple(allowed_exts)
@@ -158,4 +157,27 @@ class DataLoaderS3Service:
             return response['Body'].read()
         except Exception as e:
             logger.error(f"S3 Download Error (Bytes): {e}")
+            raise e
+
+    def upload_bytes(self, bucket_name: str, key: str, data: bytes,
+                     content_type: str = 'application/octet-stream') -> None:
+        """
+        Wgrywa bajty do S3.
+
+        Args:
+            bucket_name: Nazwa bucketa S3
+            key: Klucz (ścieżka) pliku w S3
+            data: Dane w formie bajtów
+            content_type: Typ MIME (domyślnie 'application/octet-stream')
+        """
+        try:
+            self.s3_client.put_object(
+                Bucket=bucket_name,
+                Key=key,
+                Body=data,
+                ContentType=content_type
+            )
+            logger.info(f"✓ Wgrano plik do S3: s3://{bucket_name}/{key}")
+        except Exception as e:
+            logger.error(f"S3 Upload Error: Nie udało się wgrać {key} do {bucket_name}: {e}")
             raise e
