@@ -23,8 +23,8 @@ class S3TextObject:
 
 class DataLoaderS3Service:
     def __init__(self):
-        self.aws_key = os.getenv('S3_AKID') or os.getenv('AWS_ACCESS_KEY_ID')
-        self.aws_secret = os.getenv('S3_SK') or os.getenv('AWS_SECRET_ACCESS_KEY')
+        self.aws_key = os.getenv('S3_ACCESS_KEY_ID') or os.getenv('AWS_ACCESS_KEY_ID')
+        self.aws_secret = os.getenv('S3_SECRET_ACCESS_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY')
         self.aws_region = os.getenv('AWS_REGION') or os.getenv('S3_REGION') or "eu-north-1"
         self.s3_endpoint = os.getenv('S3_ENDPOINT')
         self.s3_verify = self._resolve_s3_verify()
@@ -42,15 +42,53 @@ class DataLoaderS3Service:
         if self.s3_endpoint:
             client_kwargs['endpoint_url'] = self.s3_endpoint
 
+        logger.info(
+            "S3Service: endpoint=%s verify=%s",
+            self.s3_endpoint or "<aws-default>",
+            self.s3_verify,
+        )
         self.s3_client = self.session.client('s3', **client_kwargs)
 
     @staticmethod
     def _resolve_s3_verify() -> bool | str:
+        verify_disabled = os.getenv('S3_SSL_VERIFY') or os.getenv('AWS_SSL_VERIFY')
+        if verify_disabled and verify_disabled.lower() in {'0', 'false', 'no', 'off'}:
+            return False
+
         explicit_bundle = os.getenv('S3_CA_BUNDLE') or os.getenv('AWS_CA_BUNDLE')
         if explicit_bundle:
-            return explicit_bundle
+            return DataLoaderS3Service._resolve_ca_path(explicit_bundle)
+
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        fallback_candidates = (
+            'root-ca.pem',
+            'root-ca.crt',
+            'ca.pem',
+            'ca.crt',
+        )
+        for candidate in fallback_candidates:
+            candidate_path = os.path.join(project_root, candidate)
+            if os.path.exists(candidate_path):
+                return candidate_path
 
         return True
+
+    @staticmethod
+    def _resolve_ca_path(path_value: str) -> str:
+        normalized = os.path.expandvars(os.path.expanduser(path_value))
+        if os.path.isabs(normalized):
+            return normalized
+
+        cwd_candidate = os.path.abspath(normalized)
+        if os.path.exists(cwd_candidate):
+            return cwd_candidate
+
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        project_candidate = os.path.join(project_root, normalized)
+        if os.path.exists(project_candidate):
+            return project_candidate
+
+        return normalized
 
     def list_objects(self, bucket_name: str, prefix: str = "") -> Generator[str, None, None]:
         """
