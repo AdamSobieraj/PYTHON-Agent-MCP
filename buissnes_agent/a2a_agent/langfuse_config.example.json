@@ -44,16 +44,17 @@
     {
       "name": "knowledge_base",
       "transport": "streamable_http",
-      "url": "http://dockge.home.arpa:8012/mcp"
+      "url": "http://dockge.home.arpa:8012/mcp",
+      "blocked_tools": [
+        "confluence_search"
+      ]
     },
     {
       "name": "atlassian",
       "transport": "streamable_http",
       "url": "http://dockge.home.arpa:9002/mcp",
-      "blocked_tools": [
-        "confluence_update_page",
-        "confluence_delete_page",
-        "confluence_delete_attachment"
+      "allowed_tools": [
+        "confluence_search"
       ]
     }
   ]
