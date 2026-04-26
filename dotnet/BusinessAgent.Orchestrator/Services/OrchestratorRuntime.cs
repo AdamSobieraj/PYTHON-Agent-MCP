@@ -1,0 +1,529 @@
+using System.Text;
+
+using A2A;
+
+using BusinessAgent.Orchestrator.Configuration;
+using BusinessAgent.Orchestrator.Models;
+
+using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.Agents;
+using Microsoft.SemanticKernel.ChatCompletion;
+using Microsoft.SemanticKernel.Connectors.OpenAI;
+
+using ModelContextProtocol.Client;
+
+namespace BusinessAgent.Orchestrator.Services;
+
+public sealed class OrchestratorRuntime(
+    IOrchestratorConfigProvider configProvider,
+    ILoggerFactory loggerFactory) : IAsyncDisposable
+{
+    private readonly SemaphoreSlim _initializeLock = new(1, 1);
+    private readonly List<IAsyncDisposable> _asyncDisposables = [];
+    private readonly Dictionary<string, DiscoveredA2AAgent> _a2aAgents =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly ILogger<OrchestratorRuntime> _logger =
+        loggerFactory.CreateLogger<OrchestratorRuntime>();
+
+    private bool _initialized;
+    private ChatCompletionAgent? _agent;
+
+    public OrchestratorConfig RuntimeConfig { get; private set; } = new();
+
+    public DiscoverySnapshot Snapshot { get; private set; } = new();
+
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        if (_initialized)
+        {
+            return;
+        }
+
+        await _initializeLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_initialized)
+            {
+                return;
+            }
+
+            RuntimeConfig = await configProvider.LoadAsync(cancellationToken);
+            ValidateChatConfiguration();
+
+            var discoveryWarnings = new List<string>();
+            var discoveredMcpTools = new List<DiscoveredMcpTool>();
+            var discoveredA2aAgents = new List<DiscoveredA2AAgent>();
+
+            var kernelBuilder = Kernel.CreateBuilder();
+            ConfigureChatCompletion(kernelBuilder);
+
+            var delegationLogger = loggerFactory.CreateLogger<A2ADelegationPlugin>();
+            kernelBuilder.Plugins.AddFromObject(
+                new A2ADelegationPlugin(this, delegationLogger));
+
+            foreach (var agentConfig in RuntimeConfig.Config.A2aAgents.Where(static agent => agent.Enabled))
+            {
+                try
+                {
+                    var discoveredAgent = await DiscoverA2aAgentAsync(agentConfig);
+                    _a2aAgents[discoveredAgent.Name] = discoveredAgent;
+                    discoveredA2aAgents.Add(discoveredAgent);
+                }
+                catch (Exception ex)
+                {
+                    var warning =
+                        $"Failed to discover A2A agent '{agentConfig.ResolvedName()}': {ex.Message}";
+                    _logger.LogWarning(ex, warning);
+                    discoveryWarnings.Add(warning);
+                }
+            }
+
+            var kernel = kernelBuilder.Build();
+
+            foreach (var serverConfig in RuntimeConfig.Config.McpServers.Where(static server => server.Enabled))
+            {
+                try
+                {
+                    var serverTools = await DiscoverMcpToolsAsync(
+                        kernel,
+                        serverConfig,
+                        cancellationToken);
+                    discoveredMcpTools.AddRange(serverTools);
+                }
+                catch (Exception ex)
+                {
+                    var warning =
+                        $"Failed to discover MCP server '{serverConfig.ResolvedName()}': {ex.Message}";
+                    _logger.LogWarning(ex, warning);
+                    discoveryWarnings.Add(warning);
+                }
+            }
+
+            _agent = new ChatCompletionAgent
+            {
+                Name = "BusinessAgentOrchestrator",
+                Instructions = BuildAgentInstructions(
+                    RuntimeConfig,
+                    discoveredA2aAgents,
+                    discoveredMcpTools),
+                Kernel = kernel,
+                Arguments = new KernelArguments(
+                    new OpenAIPromptExecutionSettings
+                    {
+                        Temperature = RuntimeConfig.Config.Temperature,
+                        FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(),
+                    }),
+            };
+
+            Snapshot = new DiscoverySnapshot
+            {
+                LoadedAt = DateTimeOffset.UtcNow,
+                ConfigPath = configProvider.ResolvedPath,
+                A2aAgents = discoveredA2aAgents,
+                McpTools = discoveredMcpTools,
+                Warnings = discoveryWarnings,
+            };
+
+            _logger.LogInformation(
+                "Orchestrator initialized. Discovered {AgentCount} A2A agents and {ToolCount} MCP tools.",
+                discoveredA2aAgents.Count,
+                discoveredMcpTools.Count);
+
+            _initialized = true;
+        }
+        finally
+        {
+            _initializeLock.Release();
+        }
+    }
+
+    public IEnumerable<string> GetKnownA2aAgentNames() => _a2aAgents.Keys.OrderBy(static key => key);
+
+    public DiscoveredA2AAgent? TryGetA2aAgent(string agentName)
+    {
+        _a2aAgents.TryGetValue(agentName, out var agent);
+        return agent;
+    }
+
+    public async Task<string> GenerateResponseAsync(
+        string requestText,
+        CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+
+        if (_agent is null)
+        {
+            throw new InvalidOperationException("The orchestrator agent has not been initialized.");
+        }
+
+        var responseBuilder = new StringBuilder();
+        await foreach (AgentResponseItem<ChatMessageContent> response in _agent.InvokeAsync(
+            requestText,
+            cancellationToken: cancellationToken))
+        {
+            if (!string.IsNullOrWhiteSpace(response.Message.Content))
+            {
+                responseBuilder.Append(response.Message.Content);
+            }
+        }
+
+        return responseBuilder.ToString().Trim();
+    }
+
+    public string FormatDelegatedResponse(
+        DiscoveredA2AAgent agent,
+        SendMessageResponse response)
+    {
+        if (response.Message is not null)
+        {
+            return FormatMessageParts(agent.DisplayName, response.Message.Parts);
+        }
+
+        if (response.Task is not null)
+        {
+            var artifactText = ExtractArtifactsText(response.Task.Artifacts);
+            if (!string.IsNullOrWhiteSpace(artifactText))
+            {
+                return artifactText;
+            }
+
+            var statusText = ExtractMessageText(response.Task.Status.Message);
+            if (!string.IsNullOrWhiteSpace(statusText))
+            {
+                return statusText;
+            }
+
+            return
+                $"{agent.DisplayName} returned task state '{NormalizeTaskState(response.Task.Status.State)}' without text output.";
+        }
+
+        return $"{agent.DisplayName} returned an empty A2A response.";
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        for (var index = _asyncDisposables.Count - 1; index >= 0; index--)
+        {
+            try
+            {
+                await _asyncDisposables[index].DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Async disposal failed while shutting down orchestrator runtime.");
+            }
+        }
+
+        _initializeLock.Dispose();
+    }
+
+    private static void ValidateChatConfiguration()
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CHAT_BASE_URL")))
+        {
+            throw new InvalidOperationException("CHAT_BASE_URL environment variable is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CHAT_MODEL")))
+        {
+            throw new InvalidOperationException("CHAT_MODEL environment variable is required.");
+        }
+    }
+
+    private static void ConfigureChatCompletion(
+        IKernelBuilder kernelBuilder)
+    {
+        var modelId = Environment.GetEnvironmentVariable("CHAT_MODEL")
+            ?? throw new InvalidOperationException("CHAT_MODEL environment variable is required.");
+        var endpoint = Environment.GetEnvironmentVariable("CHAT_BASE_URL")
+            ?? throw new InvalidOperationException("CHAT_BASE_URL environment variable is required.");
+        var apiKey = Environment.GetEnvironmentVariable("CHAT_API_KEY") ?? "EMPTY";
+
+        kernelBuilder.AddOpenAIChatCompletion(
+            modelId,
+            new Uri(endpoint),
+            apiKey);
+    }
+
+    private async Task<DiscoveredA2AAgent> DiscoverA2aAgentAsync(A2AAgentConfig agentConfig)
+    {
+        EnsureResolvedEndpoint(agentConfig.Url, $"A2A agent '{agentConfig.ResolvedName()}'");
+
+        var resolver = new A2ACardResolver(new Uri(agentConfig.Url));
+        var card = await resolver.GetAgentCardAsync();
+        var selectedInterface = ChooseA2aInterface(card, agentConfig.Transport)
+            ?? throw new InvalidOperationException(
+                $"No suitable 1.0 interface was found for '{agentConfig.Url}'.");
+
+        var discoveredName = NormalizeIdentifier(agentConfig.ResolvedName());
+        var skillDescriptions = (card.Skills ?? [])
+            .Select(skill => string.IsNullOrWhiteSpace(skill.Description)
+                ? skill.Name
+                : $"{skill.Name}: {skill.Description}")
+            .ToList();
+
+        return new DiscoveredA2AAgent(
+            Name: discoveredName,
+            DisplayName: card.Name,
+            Description: card.Description,
+            EndpointUrl: selectedInterface.Url,
+            ProtocolBinding: selectedInterface.ProtocolBinding,
+            Skills: skillDescriptions);
+    }
+
+    private async Task<IReadOnlyList<DiscoveredMcpTool>> DiscoverMcpToolsAsync(
+        Kernel kernel,
+        McpServerConfig serverConfig,
+        CancellationToken cancellationToken)
+    {
+        var normalizedTransport = NormalizeIdentifier(serverConfig.Transport);
+        if (normalizedTransport is not ("streamable_http" or "streamablehttp"))
+        {
+            throw new NotSupportedException(
+                $"MCP transport '{serverConfig.Transport}' is not supported by this basic orchestrator yet.");
+        }
+
+        if (string.IsNullOrWhiteSpace(serverConfig.Url))
+        {
+            throw new InvalidOperationException(
+                $"MCP server '{serverConfig.ResolvedName()}' requires a url.");
+        }
+
+        EnsureResolvedEndpoint(serverConfig.Url, $"MCP server '{serverConfig.ResolvedName()}'");
+
+        var serverName = NormalizeIdentifier(serverConfig.ResolvedName());
+        var transport = new HttpClientTransport(
+            new()
+            {
+                Endpoint = new Uri(serverConfig.Url),
+                Name = serverName,
+                TransportMode = HttpTransportMode.StreamableHttp,
+                AdditionalHeaders = serverConfig.Headers is { Count: > 0 }
+                    ? new Dictionary<string, string>(serverConfig.Headers)
+                    : null,
+            },
+            loggerFactory);
+        _asyncDisposables.Add(transport);
+
+        var mcpClient = await McpClient.CreateAsync(
+            transport,
+            loggerFactory: loggerFactory,
+            cancellationToken: cancellationToken);
+        _asyncDisposables.Add(mcpClient);
+
+        var rawTools = await mcpClient.ListToolsAsync().ConfigureAwait(false);
+        var usableTools = rawTools
+            .Where(tool => MatchesToolFilters(tool.Name, serverConfig))
+            .ToList();
+
+        if (usableTools.Count == 0)
+        {
+            _logger.LogInformation(
+                "MCP server {ServerName} exposed no usable tools after applying filters.",
+                serverName);
+            return Array.Empty<DiscoveredMcpTool>();
+        }
+
+        kernel.Plugins.AddFromFunctions(
+            serverName,
+            usableTools.Select(tool => tool.AsKernelFunction()));
+
+        return usableTools
+            .Select(tool => new DiscoveredMcpTool(
+                ServerName: serverName,
+                ToolName: tool.Name,
+                Description: tool.Description ?? string.Empty))
+            .ToList();
+    }
+
+    private static string BuildAgentInstructions(
+        OrchestratorConfig config,
+        IReadOnlyCollection<DiscoveredA2AAgent> agents,
+        IReadOnlyCollection<DiscoveredMcpTool> mcpTools)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine(config.Prompt.Trim());
+        builder.AppendLine();
+        builder.AppendLine("Runtime discovery snapshot:");
+
+        if (agents.Count == 0)
+        {
+            builder.AppendLine("- No A2A agents were discovered.");
+        }
+        else
+        {
+            builder.AppendLine("- Discovered A2A agents:");
+            foreach (var agent in agents)
+            {
+                builder.AppendLine(
+                    $"  - {agent.Name}: {agent.DisplayName}. {agent.Description}");
+                if (agent.Skills.Count > 0)
+                {
+                    builder.AppendLine(
+                        $"    Skills: {string.Join(" | ", agent.Skills)}");
+                }
+            }
+        }
+
+        if (mcpTools.Count == 0)
+        {
+            builder.AppendLine("- No MCP tools were discovered.");
+        }
+        else
+        {
+            builder.AppendLine("- Discovered MCP tools:");
+            foreach (var toolGroup in mcpTools.GroupBy(static tool => tool.ServerName))
+            {
+                builder.AppendLine(
+                    $"  - {toolGroup.Key}: {string.Join(", ", toolGroup.Select(static tool => tool.ToolName))}");
+            }
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("Operating rules:");
+        builder.AppendLine("- Use discovered MCP tools directly when they can solve the request.");
+        builder.AppendLine("- Use `delegate_to_agent` when a discovered A2A agent is a better specialist for a subtask.");
+        builder.AppendLine("- When delegating, send a self-contained request and then synthesize the result for the user.");
+        builder.AppendLine("- Never invent tools, agent names, skills, or capabilities that were not discovered at startup.");
+        builder.AppendLine("- If discovery was partial, say that clearly instead of pretending a missing dependency is available.");
+        return builder.ToString();
+    }
+
+    private static void EnsureResolvedEndpoint(string? endpoint, string subject)
+    {
+        if (!string.IsNullOrWhiteSpace(endpoint)
+            && endpoint.Contains('$', StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{subject} has an unresolved endpoint value: '{endpoint}'.");
+        }
+    }
+
+    private static AgentInterface? ChooseA2aInterface(
+        AgentCard card,
+        string? preferredTransport)
+    {
+        var supportedInterfaces = card.SupportedInterfaces ?? [];
+        if (supportedInterfaces.Count == 0)
+        {
+            return null;
+        }
+
+        var normalizedPreferredTransport = NormalizeIdentifier(preferredTransport ?? "jsonrpc");
+        var preferred = supportedInterfaces.FirstOrDefault(candidate =>
+            string.Equals(candidate.ProtocolVersion, "1.0", StringComparison.OrdinalIgnoreCase)
+            && NormalizeIdentifier(candidate.ProtocolBinding) == normalizedPreferredTransport);
+        if (preferred is not null)
+        {
+            return preferred;
+        }
+
+        preferred = supportedInterfaces.FirstOrDefault(candidate =>
+            string.Equals(candidate.ProtocolVersion, "1.0", StringComparison.OrdinalIgnoreCase)
+            && NormalizeIdentifier(candidate.ProtocolBinding) is "jsonrpc" or "http_json" or "http_jsonrpc" or "httpjson");
+        if (preferred is not null)
+        {
+            return preferred;
+        }
+
+        return supportedInterfaces.FirstOrDefault(candidate =>
+            string.Equals(candidate.ProtocolVersion, "1.0", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool MatchesToolFilters(string toolName, McpServerConfig serverConfig)
+    {
+        var normalizedToolName = NormalizeIdentifier(toolName);
+        var allowedTools = serverConfig.AllowedTools
+            .Select(NormalizeIdentifier)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var blockedTools = serverConfig.BlockedTools
+            .Select(NormalizeIdentifier)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (allowedTools.Count > 0 && !allowedTools.Contains(normalizedToolName))
+        {
+            return false;
+        }
+
+        if (blockedTools.Contains(normalizedToolName))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    public static string ExtractMessageText(Message? message) =>
+        message is null
+            ? string.Empty
+            : FormatMessageParts("message", message.Parts);
+
+    private static string ExtractArtifactsText(IEnumerable<Artifact>? artifacts)
+    {
+        if (artifacts is null)
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder();
+        foreach (var artifact in artifacts)
+        {
+            var text = ExtractPartsText(artifact.Parts);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                continue;
+            }
+
+            if (builder.Length > 0)
+            {
+                builder.AppendLine();
+                builder.AppendLine();
+            }
+
+            builder.Append(text.Trim());
+        }
+
+        return builder.ToString().Trim();
+    }
+
+    public static string FormatMessageParts(string label, IEnumerable<Part> parts)
+    {
+        var text = ExtractPartsText(parts);
+        return string.IsNullOrWhiteSpace(text)
+            ? $"{label} returned no text content."
+            : text;
+    }
+
+    public static string ExtractPartsText(IEnumerable<Part> parts)
+    {
+        var builder = new StringBuilder();
+        foreach (var part in parts)
+        {
+            if (!string.IsNullOrWhiteSpace(part.Text))
+            {
+                if (builder.Length > 0)
+                {
+                    builder.AppendLine();
+                }
+
+                builder.Append(part.Text.Trim());
+            }
+        }
+
+        return builder.ToString().Trim();
+    }
+
+    public static string NormalizeIdentifier(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? string.Empty
+            : value.Trim().ToLowerInvariant().Replace('-', '_').Replace(' ', '_').Replace('+', '_');
+
+    public static string NormalizeTaskState(TaskState state) =>
+        state switch
+        {
+            TaskState.InputRequired => "input-required",
+            TaskState.AuthRequired => "auth-required",
+            TaskState.Canceled => "canceled",
+            _ => NormalizeIdentifier(state.ToString()).Replace('_', '-'),
+        };
+}

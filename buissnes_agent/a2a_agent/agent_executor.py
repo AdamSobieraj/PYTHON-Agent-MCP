@@ -16,12 +16,16 @@ from a2a.types import (
 )
 
 try:
-    from .agent import AGENT_SETTINGS, AnalysisAgent, LangfuseRequest
-except ImportError:
-    from buissnes_agent.a2a_agent.agent import (  # type: ignore
-        AGENT_SETTINGS,
+    from .agent import (
         AnalysisAgent,
         LangfuseRequest,
+        get_agent_settings_name,
+    )
+except ImportError:
+    from buissnes_agent.a2a_agent.agent import (  # type: ignore
+        AnalysisAgent,
+        LangfuseRequest,
+        get_agent_settings_name,
     )
 
 
@@ -393,7 +397,7 @@ class AnalysisAgentExecutor(AgentExecutor):
             'a2a_context_id': context_id,
             'a2a_message_id': message_id,
             'a2a_tenant': context.tenant,
-            'agent_settings': AGENT_SETTINGS,
+            'agent_settings': get_agent_settings_name(),
         }
 
         observation_metadata = {
