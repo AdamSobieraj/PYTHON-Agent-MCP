@@ -4,10 +4,11 @@ import yaml
 import logging
 import argparse
 from typing import Any, Dict
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("ConfigLoader")
-
+load_dotenv()
 class Config:
     """Singleton przechowujący konfigurację aplikacji."""
     _instance = None
