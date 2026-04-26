@@ -28,15 +28,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Show Docker info
+      - name: Show host and Docker disk usage
         run: |
+          df -h
           docker version
           docker info
+          docker system df || true
 
       - name: Validate registry secrets
         run: |
           test -n "${{ secrets.REGISTRY_USER }}" || { echo "REGISTRY_USER repository secret is not set"; exit 1; }
           test -n "${{ secrets.REGISTRY_PASSWORD }}" || { echo "REGISTRY_PASSWORD repository secret is not set"; exit 1; }
+
+      - name: Free Docker build space
+        run: |
+          docker container prune -f || true
+          docker builder prune -af || true
+          docker image prune -af || true
+          docker system df || true
+          df -h
 
       - name: Log in to local registry
         run: |
