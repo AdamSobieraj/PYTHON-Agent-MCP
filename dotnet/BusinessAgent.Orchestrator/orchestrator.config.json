@@ -3,8 +3,8 @@
   "config": {
     "temperature": 0,
     "agent_card": {
-      "name": "System research Agent",
-      "description": "Helps with deep research and system analysis.",
+      "name": "Business Agent Orchestrator",
+      "description": "Coordinates discovered MCP tools and discovered A2A agents for user requests.",
       "version": "1.0.0",
       "provider": {
         "organization": "Business Agent"
@@ -22,15 +22,18 @@
       ],
       "skills": [
         {
-          "id": "system_analysis",
-          "name": "System Analysis Tool",
-          "description": "Helps with system analysis and research tasks.",
+          "id": "business_orchestration",
+          "name": "Business Orchestration",
+          "description": "Routes work across discovered MCP tools and discovered A2A agents.",
           "tags": [
-            "system-analysis",
-            "research"
+            "orchestrator",
+            "a2a",
+            "mcp",
+            "semantic-kernel"
           ],
           "examples": [
-            "What is system analysis?"
+            "Use the knowledge base and then delegate deeper analysis to the research agent.",
+            "Coordinate an answer that combines MCP retrieval and another specialist A2A agent."
           ],
           "input_modes": [
             "text"

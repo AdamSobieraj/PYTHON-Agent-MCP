@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -30,9 +31,21 @@ public sealed class AgUiBridgeService(
 
         _ = Task.Run(async () =>
         {
+            var selfTargetUrl = $"{publicBaseUrl.TrimEnd('/')}/a2a/jsonrpc";
+            var runActivity = LangfuseTracing.StartAgentActivity(
+                "orchestrator.agui_run",
+                input: null,
+                sessionId: input.ThreadId,
+                traceName: "business-agent-orchestrator-agui",
+                traceMetadata: new Dictionary<string, object?>
+                {
+                    ["thread_id"] = input.ThreadId,
+                    ["run_id"] = input.RunId,
+                    ["target_url"] = selfTargetUrl,
+                });
             try
             {
-                await foreach (var payload in StreamEventsCoreAsync(input, cancellationToken))
+                await foreach (var payload in StreamEventsCoreAsync(input, runActivity, cancellationToken))
                 {
                     await channel.Writer.WriteAsync(payload, cancellationToken);
                 }
@@ -42,6 +55,7 @@ public sealed class AgUiBridgeService(
             }
             catch (Exception ex)
             {
+                LangfuseTracing.MarkError(runActivity, ex);
                 logger.LogError(ex, "AG-UI bridge failed for thread {ThreadId}", input.ThreadId);
 
                 if (!cancellationToken.IsCancellationRequested)
@@ -54,6 +68,7 @@ public sealed class AgUiBridgeService(
             }
             finally
             {
+                runActivity?.Dispose();
                 channel.Writer.TryComplete();
             }
         }, CancellationToken.None);
@@ -63,6 +78,7 @@ public sealed class AgUiBridgeService(
 
     private async IAsyncEnumerable<Dictionary<string, object?>> StreamEventsCoreAsync(
         RunAgentInput input,
+        Activity? runActivity,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(input.ThreadId))
@@ -86,162 +102,146 @@ public sealed class AgUiBridgeService(
         var assistantMessageId = $"assistant-{input.RunId}";
         var selfTargetUrl = $"{publicBaseUrl.TrimEnd('/')}/a2a/jsonrpc";
         var latestUserText = RenderContent(latestUserMessage.Content);
-        var runActivity = LangfuseTracing.StartAgentActivity(
-            "orchestrator.agui_run",
-            input: latestUserText,
-            sessionId: input.ThreadId,
-            traceName: "business-agent-orchestrator-agui",
-            traceMetadata: new Dictionary<string, object?>
-            {
-                ["thread_id"] = input.ThreadId,
-                ["run_id"] = input.RunId,
-                ["target_url"] = selfTargetUrl,
-            });
+        runActivity?.SetTag("langfuse.observation.input", latestUserText);
 
-        try
+        if (!ShouldReuseTask(session))
         {
-            if (!ShouldReuseTask(session))
+            session.LastStatusMessage = null;
+        }
+
+        session.TargetUrl = selfTargetUrl;
+        session.Transport = "JSONRPC";
+
+        yield return Event(
+            "RUN_STARTED",
+            ("threadId", input.ThreadId),
+            ("runId", input.RunId));
+
+        yield return ActivitySnapshotEvent(
+            activityMessageId,
+            BuildActivityContent(session, selfTargetUrl));
+        yield return StateSnapshotEvent(BuildStateSnapshot(session, selfTargetUrl));
+
+        var outboundText = BuildA2aRequestText(input, latestUserMessage, session);
+        var a2aClient = new A2AClient(new Uri(selfTargetUrl));
+        var request = new SendMessageRequest
+        {
+            Message = new Message
             {
-                session.LastStatusMessage = null;
-            }
+                Role = Role.User,
+                MessageId = string.IsNullOrWhiteSpace(latestUserMessage.Id)
+                    ? Guid.NewGuid().ToString("N")
+                    : latestUserMessage.Id,
+                ContextId = session.ContextId ?? input.ThreadId,
+                TaskId = ShouldReuseTask(session) ? session.TaskId : null,
+                Parts = [Part.FromText(outboundText)],
+            },
+        };
 
-            session.TargetUrl = selfTargetUrl;
-            session.Transport = "JSONRPC";
-
-            yield return Event(
-                "RUN_STARTED",
-                ("threadId", input.ThreadId),
-                ("runId", input.RunId));
-
-            yield return ActivitySnapshotEvent(
-                activityMessageId,
-                BuildActivityContent(session, selfTargetUrl));
-            yield return StateSnapshotEvent(BuildStateSnapshot(session, selfTargetUrl));
-
-            var outboundText = BuildA2aRequestText(input, latestUserMessage, session);
-            var a2aClient = new A2AClient(new Uri(selfTargetUrl));
-            var request = new SendMessageRequest
+        var emittedText = false;
+        await foreach (var response in a2aClient.SendStreamingMessageAsync(request))
+        {
+            switch (response.PayloadCase)
             {
-                Message = new Message
-                {
-                    Role = Role.User,
-                    MessageId = string.IsNullOrWhiteSpace(latestUserMessage.Id)
-                        ? Guid.NewGuid().ToString("N")
-                        : latestUserMessage.Id,
-                    ContextId = session.ContextId ?? input.ThreadId,
-                    TaskId = ShouldReuseTask(session) ? session.TaskId : null,
-                    Parts = [Part.FromText(outboundText)],
-                },
-            };
-
-            var emittedText = false;
-            await foreach (var response in a2aClient.SendStreamingMessageAsync(request))
-            {
-                switch (response.PayloadCase)
-                {
-                    case StreamResponseCase.StatusUpdate:
-                        foreach (var statusEvent in ProcessStatusUpdate(
-                                     response.StatusUpdate!,
-                                     session,
-                                     activityMessageId,
-                                     assistantMessageId,
-                                     selfTargetUrl))
-                        {
-                            if (statusEvent.TryGetValue("type", out var type)
-                                && type?.ToString() == "TEXT_MESSAGE_CONTENT")
-                            {
-                                emittedText = true;
-                            }
-
-                            yield return statusEvent;
-                        }
-
-                        break;
-
-                    case StreamResponseCase.ArtifactUpdate:
-                        foreach (var artifactEvent in ProcessArtifactUpdate(
-                                     response.ArtifactUpdate!,
-                                     session,
-                                     activityMessageId,
-                                     assistantMessageId,
-                                     selfTargetUrl))
-                        {
-                            if (artifactEvent.TryGetValue("type", out var type)
-                                && type?.ToString() == "TEXT_MESSAGE_CONTENT")
-                            {
-                                emittedText = true;
-                            }
-
-                            yield return artifactEvent;
-                        }
-
-                        break;
-
-                    case StreamResponseCase.Task:
-                        foreach (var taskEvent in ProcessTask(
-                                     response.Task!,
-                                     session,
-                                     activityMessageId,
-                                     assistantMessageId,
-                                     selfTargetUrl,
-                                     emitTaskText: !emittedText))
-                        {
-                            yield return taskEvent;
-                        }
-
-                        break;
-
-                    case StreamResponseCase.Message:
-                        foreach (var messageEvent in EmitAssistantText(
-                                     assistantMessageId,
-                                     OrchestratorRuntime.ExtractMessageText(response.Message)))
+                case StreamResponseCase.StatusUpdate:
+                    foreach (var statusEvent in ProcessStatusUpdate(
+                                 response.StatusUpdate!,
+                                 session,
+                                 activityMessageId,
+                                 assistantMessageId,
+                                 selfTargetUrl))
+                    {
+                        if (statusEvent.TryGetValue("type", out var type)
+                            && type?.ToString() == "TEXT_MESSAGE_CONTENT")
                         {
                             emittedText = true;
-                            yield return messageEvent;
                         }
 
-                        break;
-                }
+                        yield return statusEvent;
+                    }
+
+                    break;
+
+                case StreamResponseCase.ArtifactUpdate:
+                    foreach (var artifactEvent in ProcessArtifactUpdate(
+                                 response.ArtifactUpdate!,
+                                 session,
+                                 activityMessageId,
+                                 assistantMessageId,
+                                 selfTargetUrl))
+                    {
+                        if (artifactEvent.TryGetValue("type", out var type)
+                            && type?.ToString() == "TEXT_MESSAGE_CONTENT")
+                        {
+                            emittedText = true;
+                        }
+
+                        yield return artifactEvent;
+                    }
+
+                    break;
+
+                case StreamResponseCase.Task:
+                    foreach (var taskEvent in ProcessTask(
+                                 response.Task!,
+                                 session,
+                                 activityMessageId,
+                                 assistantMessageId,
+                                 selfTargetUrl,
+                                 emitTaskText: !emittedText))
+                    {
+                        yield return taskEvent;
+                    }
+
+                    break;
+
+                case StreamResponseCase.Message:
+                    foreach (var messageEvent in EmitAssistantText(
+                                 assistantMessageId,
+                                 OrchestratorRuntime.ExtractMessageText(response.Message)))
+                    {
+                        emittedText = true;
+                        yield return messageEvent;
+                    }
+
+                    break;
             }
-
-            session.Initialized = true;
-            yield return StateSnapshotEvent(BuildStateSnapshot(session, selfTargetUrl));
-
-            if (session.LastTaskState is "failed" or "rejected" or "canceled")
-            {
-                var failureMessage =
-                    session.LastStatusMessage
-                    ?? $"The A2A task ended with state '{session.LastTaskState}'.";
-                LangfuseTracing.SetOutput(runActivity, failureMessage, traceLevel: true);
-                yield return Event(
-                    "RUN_ERROR",
-                    ("message", failureMessage),
-                    ("code", session.LastTaskState));
-                yield break;
-            }
-
-            var runResult = new Dictionary<string, object?>
-            {
-                ["taskState"] = session.LastTaskState,
-                ["contextId"] = session.ContextId,
-                ["taskId"] = session.TaskId,
-                ["target"] = new Dictionary<string, object?>
-                {
-                    ["url"] = session.TargetUrl ?? selfTargetUrl,
-                    ["transport"] = session.Transport ?? "JSONRPC",
-                },
-            };
-            LangfuseTracing.SetOutput(runActivity, JsonSerializer.Serialize(runResult), traceLevel: true);
-            yield return Event(
-                "RUN_FINISHED",
-                ("threadId", input.ThreadId),
-                ("runId", input.RunId),
-                ("result", runResult));
         }
-        finally
+
+        session.Initialized = true;
+        yield return StateSnapshotEvent(BuildStateSnapshot(session, selfTargetUrl));
+
+        if (session.LastTaskState is "failed" or "rejected" or "canceled")
         {
-            runActivity?.Dispose();
+            var failureMessage =
+                session.LastStatusMessage
+                ?? $"The A2A task ended with state '{session.LastTaskState}'.";
+            LangfuseTracing.MarkError(runActivity, new InvalidOperationException(failureMessage));
+            LangfuseTracing.SetOutput(runActivity, failureMessage, traceLevel: true);
+            yield return Event(
+                "RUN_ERROR",
+                ("message", failureMessage),
+                ("code", session.LastTaskState));
+            yield break;
         }
+
+        var runResult = new Dictionary<string, object?>
+        {
+            ["taskState"] = session.LastTaskState,
+            ["contextId"] = session.ContextId,
+            ["taskId"] = session.TaskId,
+            ["target"] = new Dictionary<string, object?>
+            {
+                ["url"] = session.TargetUrl ?? selfTargetUrl,
+                ["transport"] = session.Transport ?? "JSONRPC",
+            },
+        };
+        LangfuseTracing.SetOutput(runActivity, JsonSerializer.Serialize(runResult), traceLevel: true);
+        yield return Event(
+            "RUN_FINISHED",
+            ("threadId", input.ThreadId),
+            ("runId", input.RunId),
+            ("result", runResult));
     }
 
     private static bool ShouldReuseTask(AgUiThreadSession session) =>

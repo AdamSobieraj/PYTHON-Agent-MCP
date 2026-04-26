@@ -32,8 +32,6 @@ builder.Services.AddCors(options =>
     });
 });
 
-var bootstrapRuntimeConfig = await LoadBootstrapRuntimeConfigAsync(builder);
-
 builder.Services.AddHttpClient(nameof(LangfuseOrchestratorConfigProvider));
 builder.Services.AddSingleton<JsonOrchestratorConfigProvider>();
 builder.Services.AddSingleton<IOrchestratorConfigProvider, LangfuseOrchestratorConfigProvider>();
@@ -45,7 +43,7 @@ builder.Services.AddSingleton(sp =>
         sp.GetRequiredService<AgUiThreadSessionStore>(),
         sp.GetRequiredService<ILogger<AgUiBridgeService>>()));
 
-var agentCard = AgentCardFactory.Build(publicBaseUrl, bootstrapRuntimeConfig);
+var agentCard = AgentCardFactory.Build(publicBaseUrl);
 builder.Services.AddA2AAgent<OrchestratorA2AAgent>(agentCard);
 
 var app = builder.Build();
@@ -142,38 +140,4 @@ static string ResolvePublicBaseUrl(string bindUrl, string? configuredPublicBaseU
         Host = host,
     };
     return builder.Uri.ToString().TrimEnd('/');
-}
-
-static async Task<OrchestratorConfig?> LoadBootstrapRuntimeConfigAsync(
-    WebApplicationBuilder builder)
-{
-    using var loggerFactory = LoggerFactory.Create(logging =>
-    {
-        logging.ClearProviders();
-        logging.AddSimpleConsole(options =>
-        {
-            options.SingleLine = true;
-            options.TimestampFormat = "HH:mm:ss ";
-        });
-    });
-    using var httpClientFactory = new BootstrapHttpClientFactory();
-
-    var jsonProvider = new JsonOrchestratorConfigProvider(
-        builder.Environment,
-        loggerFactory.CreateLogger<JsonOrchestratorConfigProvider>());
-    var langfuseProvider = new LangfuseOrchestratorConfigProvider(
-        jsonProvider,
-        httpClientFactory,
-        loggerFactory.CreateLogger<LangfuseOrchestratorConfigProvider>());
-
-    return await langfuseProvider.LoadAsync();
-}
-
-file sealed class BootstrapHttpClientFactory : IHttpClientFactory, IDisposable
-{
-    private readonly HttpClient _httpClient = new();
-
-    public HttpClient CreateClient(string name) => _httpClient;
-
-    public void Dispose() => _httpClient.Dispose();
 }

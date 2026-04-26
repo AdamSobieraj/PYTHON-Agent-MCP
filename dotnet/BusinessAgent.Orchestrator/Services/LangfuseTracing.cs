@@ -123,7 +123,6 @@ internal static class LangfuseTracing
             }
         }
 
-        ApplyObservationMetadata(activity, observationMetadata);
         return activity;
     }
 

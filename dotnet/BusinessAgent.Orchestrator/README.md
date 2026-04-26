@@ -68,11 +68,11 @@ Expected Langfuse setup:
 3. Put the runtime JSON config in the prompt `config` field.
 4. Assign the `production` label to the prompt version you want to serve, unless you fetch by explicit version.
 
-The example config payload to paste into Langfuse is in [langfuse_config.example.json](/E:/agent2/dotnet/BusinessAgent.Orchestrator/langfuse_config.example.json:1).
+The example config payload to paste into Langfuse is in [langfuse_config.example.json](./langfuse_config.example.json).
 
 ## Local fallback
 
-If Langfuse is disabled, unreachable, or the prompt fetch fails, the orchestrator falls back to [orchestrator.config.json](/E:/agent2/dotnet/BusinessAgent.Orchestrator/orchestrator.config.json:1).
+If Langfuse is disabled, unreachable, or the prompt fetch fails, the orchestrator falls back to [orchestrator.config.json](./orchestrator.config.json).
 
 The local config file supports `${ENV_VAR:-fallback}` expansion.
 
