@@ -559,6 +559,7 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
+        self.assertEqual(payload['configPath'], 'default_config.json')
         self.assertEqual(payload['a2aAgents'][0]['name'], 'Deep Research Agent')
         self.assertEqual(payload['mcpTools'][0]['toolName'], 'search_docs')
         self.assertEqual(payload['warnings'], [])
@@ -1238,6 +1239,62 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]['type'], 'RUN_STARTED')
         self.assertEqual(events[-1]['type'], 'RUN_ERROR')
         self.assertEqual(events[-1]['message'], 'AG-UI graph failure')
+
+    async def test_analysis_agent_stream_ag_ui_falls_back_to_full_final_output(
+        self,
+    ) -> None:
+        class DivergingGraph:
+            async def astream(
+                self,
+                inputs: dict[str, Any],
+                config: dict[str, Any],
+                stream_mode: list[str],
+                version: str,
+            ):
+                yield {
+                    'type': 'messages',
+                    'data': (
+                        AIMessage(content='Draft answer'),
+                        {'langgraph_node': 'agent'},
+                    ),
+                }
+
+            async def aget_state(self, config: dict[str, Any]):
+                return SimpleNamespace(
+                    values={
+                        'messages': [AIMessage(content='Final polished answer.')],
+                        'structured_response': {
+                            'status': 'completed',
+                            'message': 'Final polished answer.',
+                        },
+                    }
+                )
+
+        agent = AnalysisAgent()
+        agent.graph = DivergingGraph()
+        agent._langfuse_initialized = True
+        agent.langfuse_enabled = False
+
+        run_input = RunAgentInput(
+            thread_id='thread-1',
+            run_id='run-1',
+            messages=[AgUiMessage(id='user-1', role='user', content='hello')],
+        )
+
+        events = []
+        async for event in agent.stream_ag_ui(run_input):
+            events.append(event.model_dump(by_alias=True, exclude_none=True))
+
+        text_deltas = [
+            event['delta']
+            for event in events
+            if event['type'] == 'TEXT_MESSAGE_CONTENT'
+        ]
+
+        self.assertEqual(
+            text_deltas,
+            ['Draft answer', 'Final polished answer.'],
+        )
 
     async def test_get_agent_response_separates_artifact_from_status_message(
         self,

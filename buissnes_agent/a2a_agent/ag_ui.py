@@ -208,6 +208,16 @@ class CustomEvent(BaseEvent):
     value: Any
 
 
+def get_last_user_text(messages: list[Message]) -> str:
+    for message in reversed(messages):
+        if message.role.strip().lower() != 'user':
+            continue
+        text = flatten_text_content(message.content)
+        if text:
+            return text
+    return ''
+
+
 class EventEncoder:
     def __init__(self, accept: str | None = None) -> None:
         accept_value = (accept or '').lower()
@@ -217,12 +227,25 @@ class EventEncoder:
             or '*/*' in accept_value
         )
 
+    @staticmethod
+    def _json_default(value: Any) -> Any:
+        if hasattr(value, 'model_dump'):
+            return value.model_dump(exclude_none=True)
+        if isinstance(value, bytes):
+            return value.decode('utf-8', errors='replace')
+        if isinstance(value, bytearray):
+            return bytes(value).decode('utf-8', errors='replace')
+        if isinstance(value, set):
+            return list(value)
+        return str(value)
+
     def encode(self, event: BaseEvent) -> str:
         payload = event.model_dump(by_alias=True, exclude_none=True)
         body = json.dumps(
             payload,
             ensure_ascii=False,
             separators=(',', ':'),
+            default=self._json_default,
         )
         if self._use_sse:
             return f'data: {body}\n\n'

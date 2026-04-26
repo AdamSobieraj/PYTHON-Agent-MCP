@@ -42,7 +42,12 @@ from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
 from a2a.utils.proto_utils import parse_params
 
 try:
-    from .ag_ui import AG_UI_MEDIA_TYPE, EventEncoder, RunAgentInput
+    from .ag_ui import (
+        AG_UI_MEDIA_TYPE,
+        EventEncoder,
+        RunAgentInput,
+        get_last_user_text,
+    )
     from .agent import AnalysisAgent
     from .agent_executor import AnalysisAgentExecutor
     from .mcp_config import AgentRuntimeConfig
@@ -51,6 +56,7 @@ except ImportError:
         AG_UI_MEDIA_TYPE,
         EventEncoder,
         RunAgentInput,
+        get_last_user_text,
     )
     from buissnes_agent.a2a_agent.agent import AnalysisAgent  # type: ignore
     from buissnes_agent.a2a_agent.agent_executor import AnalysisAgentExecutor  # type: ignore
@@ -426,7 +432,7 @@ def _build_app(
                 detail='AG-UI requests require at least one message.',
             )
 
-        if not agent_executor.agent._get_last_ag_ui_user_text(input_data.messages):
+        if not get_last_user_text(input_data.messages):
             raise HTTPException(
                 status_code=400,
                 detail='AG-UI requests require a user text message.',
@@ -466,10 +472,7 @@ def _build_app(
     async def get_catalog() -> dict[str, Any]:
         return {
             'loadedAt': datetime.now(timezone.utc).isoformat(),
-            'configPath': os.path.join(
-                os.path.dirname(__file__),
-                'default_config.json',
-            ),
+            'configPath': 'default_config.json',
             'a2aAgents': [
                 {
                     'name': agent_card.name,

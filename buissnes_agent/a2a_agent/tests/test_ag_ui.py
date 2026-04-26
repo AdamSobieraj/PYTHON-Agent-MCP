@@ -1,4 +1,5 @@
 import unittest
+import json
 
 from pydantic import ValidationError
 
@@ -6,9 +7,11 @@ from buissnes_agent.a2a_agent.ag_ui import (
     AG_UI_MEDIA_TYPE,
     ActivitySnapshotEvent,
     EventEncoder,
+    Message,
     RunAgentInput,
     TextMessageContentEvent,
     flatten_text_content,
+    get_last_user_text,
     parse_tool_call_arguments,
 )
 
@@ -104,6 +107,26 @@ class AgUiProtocolTests(unittest.TestCase):
         )
 
         self.assertTrue(event.replace)
+
+    def test_event_encoder_serializes_non_json_values(self) -> None:
+        event = ActivitySnapshotEvent(
+            message_id='activity-1',
+            activity_type='TOOL',
+            content={'payload': b'abc'},
+        )
+
+        encoded = EventEncoder().encode(event)
+        payload = json.loads(encoded.removeprefix('data: ').strip())
+
+        self.assertEqual(payload['content']['payload'], 'abc')
+
+    def test_get_last_user_text_ignores_non_user_messages(self) -> None:
+        messages = [
+            Message(role='assistant', content='hello'),
+            Message(role='user', content=[{'type': 'text', 'text': 'Find docs'}]),
+        ]
+
+        self.assertEqual(get_last_user_text(messages), 'Find docs')
 
 
 if __name__ == '__main__':

@@ -33,6 +33,7 @@ try:
     from . import patch_pydantic  # noqa: F401
     from .ag_ui import (
         ActivitySnapshotEvent,
+        BaseEvent,
         Message as AgUiMessage,
         RunAgentInput,
         RunErrorEvent,
@@ -49,6 +50,7 @@ try:
         ToolCallResultEvent,
         ToolCallStartEvent,
         flatten_text_content,
+        get_last_user_text,
         parse_tool_call_arguments,
     )
     from .mcp_config import (
@@ -62,6 +64,7 @@ except ImportError:
     from buissnes_agent.a2a_agent import patch_pydantic  # type: ignore  # noqa: F401
     from buissnes_agent.a2a_agent.ag_ui import (  # type: ignore
         ActivitySnapshotEvent,
+        BaseEvent,
         Message as AgUiMessage,
         RunAgentInput,
         RunErrorEvent,
@@ -78,6 +81,7 @@ except ImportError:
         ToolCallResultEvent,
         ToolCallStartEvent,
         flatten_text_content,
+        get_last_user_text,
         parse_tool_call_arguments,
     )
     from buissnes_agent.a2a_agent.mcp_config import (  # type: ignore
@@ -1331,18 +1335,6 @@ class AnalysisAgent:
 
         return config
 
-    def _get_last_ag_ui_user_text(
-        self,
-        messages: list[AgUiMessage],
-    ) -> str:
-        for message in reversed(messages):
-            if message.role.strip().lower() != 'user':
-                continue
-            text = flatten_text_content(message.content)
-            if text:
-                return text
-        return ''
-
     def _langchain_messages_from_ag_ui(
         self,
         messages: list[AgUiMessage],
@@ -1498,7 +1490,7 @@ class AnalysisAgent:
     async def stream_ag_ui(
         self,
         run_input: RunAgentInput,
-    ) -> AsyncIterable[Any]:
+    ) -> AsyncIterable[BaseEvent]:
         self._active_streams += 1
         root_span = None
         assistant_message_id = str(uuid4())
@@ -1510,7 +1502,7 @@ class AnalysisAgent:
         completed_tool_call_ids: set[str] = set()
         seen_status_message_keys: set[str] = set()
         context_id = f'ag-ui::{run_input.thread_id}::{run_input.run_id}'
-        input_text = self._get_last_ag_ui_user_text(run_input.messages)
+        input_text = get_last_user_text(run_input.messages)
         activity_message_id = f'activity-{run_input.run_id}'
         request_trace = self._build_ag_ui_langfuse_request(
             run_input,
@@ -1675,7 +1667,12 @@ class AnalysisAgent:
                         elif not emitted_text:
                             remainder = final_output
                         else:
-                            remainder = ''
+                            logger.warning(
+                                'AG-UI streamed text diverged from final output; '
+                                'emitting the full final response.'
+                            )
+                            emitted_text = ''
+                            remainder = final_output
 
                         if remainder:
                             emitted_text += remainder
