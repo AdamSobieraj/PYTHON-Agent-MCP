@@ -82,13 +82,13 @@ class PdfParser(BaseDocumentParser):
                 "PdfParser: brak jawnego API key; uzywam placeholdera dla %s.",
                 self.base_url,
             )
-
+        # Timeout na 10 minut, żeby połączenie nie zerwało się przy trudnych stronach
         self.client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=600.0,
         )
-
+        # ── Marginesy ────────────────────────────────────────────
         self._top_margin = top_margin_crop
         self._bottom_margin = bottom_margin_crop
         self._left_margin = left_margin_crop
@@ -113,7 +113,9 @@ class PdfParser(BaseDocumentParser):
             "- Do not add ANY conversational filler (e.g., 'Here is the markdown:').\n"
             "- Stop generating immediately when you reach the end of the page content."
         )
-
+    # ══════════════════════════════════════════════════════════════
+    # INTERFEJS PUBLICZNY
+    # ══════════════════════════════════════════════════════════════
     def parse(
         self,
         file_source: Union[str, io.BytesIO, bytes],
