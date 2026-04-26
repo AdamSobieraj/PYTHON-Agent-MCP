@@ -1,10 +1,13 @@
+using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 
 using A2A;
 
 using BusinessAgent.Orchestrator.Configuration;
 using BusinessAgent.Orchestrator.Models;
 
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Agents;
 using Microsoft.SemanticKernel.ChatCompletion;
@@ -18,6 +21,8 @@ public sealed class OrchestratorRuntime(
     IOrchestratorConfigProvider configProvider,
     ILoggerFactory loggerFactory) : IAsyncDisposable
 {
+    private const string RawChatCompletionServiceId = "orchestrator-openai-raw";
+
     private readonly SemaphoreSlim _initializeLock = new(1, 1);
     private readonly List<IAsyncDisposable> _asyncDisposables = [];
     private readonly Dictionary<string, DiscoveredA2AAgent> _a2aAgents =
@@ -40,6 +45,7 @@ public sealed class OrchestratorRuntime(
         }
 
         await _initializeLock.WaitAsync(cancellationToken);
+        Activity? initializeActivity = null;
         try
         {
             if (_initialized)
@@ -48,6 +54,14 @@ public sealed class OrchestratorRuntime(
             }
 
             RuntimeConfig = await configProvider.LoadAsync(cancellationToken);
+            initializeActivity = LangfuseTracing.StartAgentActivity(
+                "orchestrator.initialize",
+                traceName: "orchestrator-startup",
+                traceMetadata: new Dictionary<string, object?>
+                {
+                    ["config_source"] = RuntimeConfig.Metadata.Source,
+                    ["config_reference"] = configProvider.ResolvedPath,
+                });
             ValidateChatConfiguration();
 
             var discoveryWarnings = new List<string>();
@@ -55,7 +69,7 @@ public sealed class OrchestratorRuntime(
             var discoveredA2aAgents = new List<DiscoveredA2AAgent>();
 
             var kernelBuilder = Kernel.CreateBuilder();
-            ConfigureChatCompletion(kernelBuilder);
+            ConfigureChatCompletion(kernelBuilder, RuntimeConfig);
 
             var delegationLogger = loggerFactory.CreateLogger<A2ADelegationPlugin>();
             kernelBuilder.Plugins.AddFromObject(
@@ -119,6 +133,10 @@ public sealed class OrchestratorRuntime(
             {
                 LoadedAt = DateTimeOffset.UtcNow,
                 ConfigPath = configProvider.ResolvedPath,
+                ConfigSource = RuntimeConfig.Metadata.Source,
+                PromptName = RuntimeConfig.Metadata.PromptName,
+                PromptVersion = RuntimeConfig.Metadata.PromptVersion,
+                PromptLabel = RuntimeConfig.Metadata.PromptLabel,
                 A2aAgents = discoveredA2aAgents,
                 McpTools = discoveredMcpTools,
                 Warnings = discoveryWarnings,
@@ -129,10 +147,25 @@ public sealed class OrchestratorRuntime(
                 discoveredA2aAgents.Count,
                 discoveredMcpTools.Count);
 
+            LangfuseTracing.SetOutput(
+                initializeActivity,
+                JsonSerializer.Serialize(new
+                {
+                    a2aAgents = discoveredA2aAgents.Count,
+                    mcpTools = discoveredMcpTools.Count,
+                    warnings = discoveryWarnings.Count,
+                }),
+                traceLevel: true);
             _initialized = true;
+        }
+        catch (Exception ex)
+        {
+            LangfuseTracing.MarkError(initializeActivity, ex);
+            throw;
         }
         finally
         {
+            initializeActivity?.Dispose();
             _initializeLock.Release();
         }
     }
@@ -156,18 +189,50 @@ public sealed class OrchestratorRuntime(
             throw new InvalidOperationException("The orchestrator agent has not been initialized.");
         }
 
+        Activity? chainActivity = null;
         var responseBuilder = new StringBuilder();
-        await foreach (AgentResponseItem<ChatMessageContent> response in _agent.InvokeAsync(
-            requestText,
-            cancellationToken: cancellationToken))
+        try
         {
-            if (!string.IsNullOrWhiteSpace(response.Message.Content))
-            {
-                responseBuilder.Append(response.Message.Content);
-            }
-        }
+            chainActivity = LangfuseTracing.StartChainActivity(
+                "orchestrator.semantic_kernel_run",
+                input: requestText,
+                traceName: "business-agent-orchestrator-run",
+                sessionId: Activity.Current?.GetBaggageItem("langfuse.session.id"),
+                traceMetadata: new Dictionary<string, object?>
+                {
+                    ["config_source"] = RuntimeConfig.Metadata.Source,
+                    ["config_reference"] = configProvider.ResolvedPath,
+                },
+                observationMetadata: new Dictionary<string, object?>
+                {
+                    ["config_source"] = RuntimeConfig.Metadata.Source,
+                    ["config_reference"] = configProvider.ResolvedPath,
+                    ["execution_engine"] = "semantic-kernel",
+                });
 
-        return responseBuilder.ToString().Trim();
+            await foreach (AgentResponseItem<ChatMessageContent> response in _agent.InvokeAsync(
+                requestText,
+                cancellationToken: cancellationToken))
+            {
+                if (!string.IsNullOrWhiteSpace(response.Message.Content))
+                {
+                    responseBuilder.Append(response.Message.Content);
+                }
+            }
+
+            var finalText = responseBuilder.ToString().Trim();
+            LangfuseTracing.SetOutput(chainActivity, finalText);
+            return finalText;
+        }
+        catch (Exception ex)
+        {
+            LangfuseTracing.MarkError(chainActivity, ex);
+            throw;
+        }
+        finally
+        {
+            chainActivity?.Dispose();
+        }
     }
 
     public string FormatDelegatedResponse(
@@ -231,7 +296,8 @@ public sealed class OrchestratorRuntime(
     }
 
     private static void ConfigureChatCompletion(
-        IKernelBuilder kernelBuilder)
+        IKernelBuilder kernelBuilder,
+        OrchestratorConfig runtimeConfig)
     {
         var modelId = Environment.GetEnvironmentVariable("CHAT_MODEL")
             ?? throw new InvalidOperationException("CHAT_MODEL environment variable is required.");
@@ -240,13 +306,30 @@ public sealed class OrchestratorRuntime(
         var apiKey = Environment.GetEnvironmentVariable("CHAT_API_KEY") ?? "EMPTY";
 
         kernelBuilder.AddOpenAIChatCompletion(
-            modelId,
-            new Uri(endpoint),
-            apiKey);
+            modelId: modelId,
+            endpoint: new Uri(endpoint),
+            apiKey: apiKey,
+            orgId: null,
+            serviceId: RawChatCompletionServiceId);
+        kernelBuilder.Services.AddSingleton<IChatCompletionService>(serviceProvider =>
+            new TracedChatCompletionService(
+                serviceProvider.GetRequiredKeyedService<IChatCompletionService>(RawChatCompletionServiceId),
+                runtimeConfig,
+                modelId));
     }
 
     private async Task<DiscoveredA2AAgent> DiscoverA2aAgentAsync(A2AAgentConfig agentConfig)
     {
+        var discoveryActivity = LangfuseTracing.StartToolActivity(
+            "orchestrator.discover_a2a_agent",
+            observationMetadata: new Dictionary<string, object?>
+            {
+                ["agent_name"] = agentConfig.ResolvedName(),
+                ["agent_url"] = agentConfig.Url,
+            });
+
+        try
+        {
         EnsureResolvedEndpoint(agentConfig.Url, $"A2A agent '{agentConfig.ResolvedName()}'");
 
         var resolver = new A2ACardResolver(new Uri(agentConfig.Url));
@@ -269,6 +352,16 @@ public sealed class OrchestratorRuntime(
             EndpointUrl: selectedInterface.Url,
             ProtocolBinding: selectedInterface.ProtocolBinding,
             Skills: skillDescriptions);
+        }
+        catch (Exception ex)
+        {
+            LangfuseTracing.MarkError(discoveryActivity, ex);
+            throw;
+        }
+        finally
+        {
+            discoveryActivity?.Dispose();
+        }
     }
 
     private async Task<IReadOnlyList<DiscoveredMcpTool>> DiscoverMcpToolsAsync(
@@ -276,6 +369,17 @@ public sealed class OrchestratorRuntime(
         McpServerConfig serverConfig,
         CancellationToken cancellationToken)
     {
+        var discoveryActivity = LangfuseTracing.StartToolActivity(
+            "orchestrator.discover_mcp_tools",
+            observationMetadata: new Dictionary<string, object?>
+            {
+                ["server_name"] = serverConfig.ResolvedName(),
+                ["transport"] = serverConfig.Transport,
+                ["endpoint"] = serverConfig.Url,
+            });
+
+        try
+        {
         var normalizedTransport = NormalizeIdentifier(serverConfig.Transport);
         if (normalizedTransport is not ("streamable_http" or "streamablehttp"))
         {
@@ -334,6 +438,16 @@ public sealed class OrchestratorRuntime(
                 ToolName: tool.Name,
                 Description: tool.Description ?? string.Empty))
             .ToList();
+        }
+        catch (Exception ex)
+        {
+            LangfuseTracing.MarkError(discoveryActivity, ex);
+            throw;
+        }
+        finally
+        {
+            discoveryActivity?.Dispose();
+        }
     }
 
     private static string BuildAgentInstructions(

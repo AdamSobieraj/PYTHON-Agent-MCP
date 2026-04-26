@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -30,9 +31,21 @@ public sealed class AgUiBridgeService(
 
         _ = Task.Run(async () =>
         {
+            var selfTargetUrl = $"{publicBaseUrl.TrimEnd('/')}/a2a/jsonrpc";
+            var runActivity = LangfuseTracing.StartAgentActivity(
+                "orchestrator.agui_run",
+                input: null,
+                sessionId: input.ThreadId,
+                traceName: "business-agent-orchestrator-agui",
+                traceMetadata: new Dictionary<string, object?>
+                {
+                    ["thread_id"] = input.ThreadId,
+                    ["run_id"] = input.RunId,
+                    ["target_url"] = selfTargetUrl,
+                });
             try
             {
-                await foreach (var payload in StreamEventsCoreAsync(input, cancellationToken))
+                await foreach (var payload in StreamEventsCoreAsync(input, runActivity, cancellationToken))
                 {
                     await channel.Writer.WriteAsync(payload, cancellationToken);
                 }
@@ -42,6 +55,7 @@ public sealed class AgUiBridgeService(
             }
             catch (Exception ex)
             {
+                LangfuseTracing.MarkError(runActivity, ex);
                 logger.LogError(ex, "AG-UI bridge failed for thread {ThreadId}", input.ThreadId);
 
                 if (!cancellationToken.IsCancellationRequested)
@@ -54,6 +68,7 @@ public sealed class AgUiBridgeService(
             }
             finally
             {
+                runActivity?.Dispose();
                 channel.Writer.TryComplete();
             }
         }, CancellationToken.None);
@@ -63,6 +78,7 @@ public sealed class AgUiBridgeService(
 
     private async IAsyncEnumerable<Dictionary<string, object?>> StreamEventsCoreAsync(
         RunAgentInput input,
+        Activity? runActivity,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(input.ThreadId))
@@ -85,6 +101,8 @@ public sealed class AgUiBridgeService(
         var activityMessageId = $"a2a-task-{input.ThreadId}";
         var assistantMessageId = $"assistant-{input.RunId}";
         var selfTargetUrl = $"{publicBaseUrl.TrimEnd('/')}/a2a/jsonrpc";
+        var latestUserText = RenderContent(latestUserMessage.Content);
+        runActivity?.SetTag("langfuse.observation.input", latestUserText);
 
         if (!ShouldReuseTask(session))
         {
@@ -195,28 +213,35 @@ public sealed class AgUiBridgeService(
 
         if (session.LastTaskState is "failed" or "rejected" or "canceled")
         {
+            var failureMessage =
+                session.LastStatusMessage
+                ?? $"The A2A task ended with state '{session.LastTaskState}'.";
+            LangfuseTracing.MarkError(runActivity, new InvalidOperationException(failureMessage));
+            LangfuseTracing.SetOutput(runActivity, failureMessage, traceLevel: true);
             yield return Event(
                 "RUN_ERROR",
-                ("message", session.LastStatusMessage ?? $"The A2A task ended with state '{session.LastTaskState}'."),
+                ("message", failureMessage),
                 ("code", session.LastTaskState));
             yield break;
         }
 
+        var runResult = new Dictionary<string, object?>
+        {
+            ["taskState"] = session.LastTaskState,
+            ["contextId"] = session.ContextId,
+            ["taskId"] = session.TaskId,
+            ["target"] = new Dictionary<string, object?>
+            {
+                ["url"] = session.TargetUrl ?? selfTargetUrl,
+                ["transport"] = session.Transport ?? "JSONRPC",
+            },
+        };
+        LangfuseTracing.SetOutput(runActivity, JsonSerializer.Serialize(runResult), traceLevel: true);
         yield return Event(
             "RUN_FINISHED",
             ("threadId", input.ThreadId),
             ("runId", input.RunId),
-            ("result", new Dictionary<string, object?>
-            {
-                ["taskState"] = session.LastTaskState,
-                ["contextId"] = session.ContextId,
-                ["taskId"] = session.TaskId,
-                ["target"] = new Dictionary<string, object?>
-                {
-                    ["url"] = session.TargetUrl ?? selfTargetUrl,
-                    ["transport"] = session.Transport ?? "JSONRPC",
-                },
-            }));
+            ("result", runResult));
     }
 
     private static bool ShouldReuseTask(AgUiThreadSession session) =>

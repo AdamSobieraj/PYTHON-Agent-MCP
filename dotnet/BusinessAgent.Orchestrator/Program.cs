@@ -20,6 +20,7 @@ builder.Logging.AddSimpleConsole(options =>
     options.SingleLine = true;
     options.TimestampFormat = "HH:mm:ss ";
 });
+builder.Services.AddLangfuseOpenTelemetry();
 
 builder.Services.AddCors(options =>
 {
@@ -31,7 +32,9 @@ builder.Services.AddCors(options =>
     });
 });
 
-builder.Services.AddSingleton<IOrchestratorConfigProvider, JsonOrchestratorConfigProvider>();
+builder.Services.AddHttpClient(nameof(LangfuseOrchestratorConfigProvider));
+builder.Services.AddSingleton<JsonOrchestratorConfigProvider>();
+builder.Services.AddSingleton<IOrchestratorConfigProvider, LangfuseOrchestratorConfigProvider>();
 builder.Services.AddSingleton<OrchestratorRuntime>();
 builder.Services.AddSingleton<AgUiThreadSessionStore>();
 builder.Services.AddSingleton(sp =>
@@ -40,7 +43,7 @@ builder.Services.AddSingleton(sp =>
         sp.GetRequiredService<AgUiThreadSessionStore>(),
         sp.GetRequiredService<ILogger<AgUiBridgeService>>()));
 
-var agentCard = BuildAgentCard(publicBaseUrl);
+var agentCard = AgentCardFactory.Build(publicBaseUrl);
 builder.Services.AddA2AAgent<OrchestratorA2AAgent>(agentCard);
 
 var app = builder.Build();
@@ -49,7 +52,7 @@ app.UseCors();
 
 app.MapGet("/", () => Results.Ok(new
 {
-    name = "Business Agent Orchestrator",
+    name = agentCard.Name,
     postPath = "/",
     healthz = "/healthz",
     catalog = "/catalog",
@@ -111,7 +114,9 @@ app.MapHttpA2A(
     "/a2a/rest");
 app.MapWellKnownAgentCard(agentCard);
 
-await app.Services.GetRequiredService<OrchestratorRuntime>().InitializeAsync();
+var runtime = app.Services.GetRequiredService<OrchestratorRuntime>();
+await runtime.InitializeAsync();
+AgentCardFactory.ApplyTo(agentCard, publicBaseUrl, runtime.RuntimeConfig);
 
 app.Run();
 
@@ -135,60 +140,4 @@ static string ResolvePublicBaseUrl(string bindUrl, string? configuredPublicBaseU
         Host = host,
     };
     return builder.Uri.ToString().TrimEnd('/');
-}
-
-static AgentCard BuildAgentCard(string publicBaseUrl)
-{
-    return new AgentCard
-    {
-        Name = "Business Agent Orchestrator",
-        Description =
-            "Coordinates discovered MCP tools and discovered A2A agents for user requests.",
-        Provider = new AgentProvider
-        {
-            Organization = "Business Agent",
-            Url = publicBaseUrl,
-        },
-        Version = "1.0.0",
-        DefaultInputModes = ["text"],
-        DefaultOutputModes = ["text", "task-status"],
-        Capabilities = new AgentCapabilities
-        {
-            Streaming = true,
-            PushNotifications = false,
-        },
-        SupportedInterfaces =
-        [
-            new AgentInterface
-            {
-                Url = $"{publicBaseUrl}/a2a/jsonrpc",
-                ProtocolBinding = "JSONRPC",
-                ProtocolVersion = "1.0",
-            },
-            new AgentInterface
-            {
-                Url = $"{publicBaseUrl}/a2a/rest",
-                ProtocolBinding = "HTTP+JSON",
-                ProtocolVersion = "1.0",
-            },
-        ],
-        Skills =
-        [
-            new AgentSkill
-            {
-                Id = "business_orchestration",
-                Name = "Business Orchestration",
-                Description =
-                    "Routes work across discovered MCP tools and discovered A2A agents.",
-                Tags = ["orchestrator", "a2a", "mcp", "semantic-kernel"],
-                Examples =
-                [
-                    "Use the knowledge base and then delegate deeper analysis to the research agent.",
-                    "Coordinate an answer that combines MCP retrieval and another specialist A2A agent.",
-                ],
-                InputModes = ["text"],
-                OutputModes = ["text", "task-status"],
-            },
-        ],
-    };
 }

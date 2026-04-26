@@ -50,6 +50,7 @@ public sealed class JsonOrchestratorConfigProvider(
                 $"The orchestrator config at '{configPath}' must define a prompt.");
         }
 
+        config.Metadata.Source = "json";
         return config;
     }
 }
