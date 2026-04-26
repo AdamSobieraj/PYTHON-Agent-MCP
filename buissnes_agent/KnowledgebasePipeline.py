@@ -259,7 +259,7 @@ class SearchKnowledgebase:
 
             current_line += line_count
 
-        logger.info(f"📄 Numeracja stron: {len(documents_list)} stron, łącznie {current_line - 1} linii")
+        logger.info(f"Numeracja stron: {len(documents_list)} stron, łącznie {current_line - 1} linii")
 
 
     def _calculate_chunk_line_numbers(self, chunk_text: str, original_text: str, page_line_start: int,
@@ -327,7 +327,7 @@ class SearchKnowledgebase:
                     break
 
             if original_doc is None:
-                logger.warning(f"⚠️ Nie znaleziono strony {chunk_page_number}")
+                logger.warning(f"Nie znaleziono strony {chunk_page_number}")
                 continue
 
             # 1. KOPIUJ zakres STRONY do chunka (document_line_*)
@@ -343,7 +343,7 @@ class SearchKnowledgebase:
 
             if chunk_position == -1:
                 # Fallback - jeśli nie znaleziono chunka, użyj zakresu całej strony
-                logger.debug(f" Chunk nie znaleziony w tekście strony {chunk_page_number}")
+                logger.debug(f"Chunk nie znaleziony w tekście strony {chunk_page_number}")
                 chunk_metadata["embedding_line_start"] = page_line_start
                 chunk_metadata["embedding_line_end"] = page_line_end
                 continue
@@ -366,7 +366,7 @@ class SearchKnowledgebase:
             chunk_metadata["embedding_line_start"] = chunk_line_start  # Zakres chunka
             chunk_metadata["embedding_line_end"] = chunk_line_end  # akres chunka
 
-        logger.info(f"📦 Numeracja chunków: {len(chunks)} chunków przetworzonych")
+        logger.info(f"Numeracja chunków: {len(chunks)} chunków przetworzonych")
 
     def _add_line_numbers_to_legacy_chunks(self, chunks: List[Dict[str, Any]], original_doc: Document) -> None:
         """

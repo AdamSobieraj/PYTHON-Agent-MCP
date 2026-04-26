@@ -26,8 +26,8 @@ services:
       - "9000:9000"  # API S3 (dla Twojego skryptu Python: S3_ENDPOINT)
       - "9001:9001"  # Konsola administratora (przeglądarka)
     environment:
-      MINIO_ROOT_USER: minioadmin      # Odpowiednik: AWS_ACCESS_KEY_ID / S3_AKID
-      MINIO_ROOT_PASSWORD: minioadmin  # Odpowiednik: AWS_SECRET_ACCESS_KEY / S3_SK
+      MINIO_ROOT_USER: minioadmin      # Odpowiednik: S3_AKID
+      MINIO_ROOT_PASSWORD: minioadmin  # Odpowiednik: S3_SK
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data
