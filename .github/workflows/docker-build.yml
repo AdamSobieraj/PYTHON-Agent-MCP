@@ -1,0 +1,61 @@
+name: Docker Build And Push
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: registry.home.arpa/executeit/python-agent-mcp
+
+jobs:
+  docker-build-and-push:
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - homelab-docker
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Show host and Docker disk usage
+        run: |
+          df -h
+          docker version
+          docker info
+          docker system df || true
+
+      - name: Validate registry secrets
+        run: |
+          test -n "${{ secrets.REGISTRY_USER }}" || { echo "REGISTRY_USER repository secret is not set"; exit 1; }
+          test -n "${{ secrets.REGISTRY_PASSWORD }}" || { echo "REGISTRY_PASSWORD repository secret is not set"; exit 1; }
+
+      - name: Free Docker build space
+        run: |
+          docker container prune -f || true
+          docker builder prune -af || true
+          docker image prune -af || true
+          docker system df || true
+          df -h
+
+      - name: Log in to local registry
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login registry.home.arpa -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+
+      - name: Build image
+        run: |
+          docker build -t "${IMAGE_NAME}:latest" .
+
+      - name: Push image
+        run: |
+          docker push "${IMAGE_NAME}:latest"
