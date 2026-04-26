@@ -1508,6 +1508,13 @@ class AnalysisAgent:
             input_text=input_text,
         )
 
+        async def ensure_text_message_started() -> AsyncIterable[BaseEvent]:
+            nonlocal text_started
+            if text_started:
+                return
+            text_started = True
+            yield TextMessageStartEvent(message_id=assistant_message_id)
+
         try:
             root_span, langfuse_handler = self._request_trace(request_trace)
 
@@ -1567,11 +1574,8 @@ class AnalysisAgent:
                             message_chunk = payload[0]
                             delta = _extract_stream_text_delta(message_chunk)
                             if delta:
-                                if not text_started:
-                                    text_started = True
-                                    yield TextMessageStartEvent(
-                                        message_id=assistant_message_id
-                                    )
+                                async for event in ensure_text_message_started():
+                                    yield event
                                 emitted_text += delta
                                 yield TextMessageContentEvent(
                                     message_id=assistant_message_id,
@@ -1598,6 +1602,8 @@ class AnalysisAgent:
                                         if tool_call_id in emitted_tool_call_ids:
                                             continue
                                         emitted_tool_call_ids.add(tool_call_id)
+                                        async for event in ensure_text_message_started():
+                                            yield event
                                         yield ToolCallStartEvent(
                                             tool_call_id=tool_call_id,
                                             tool_call_name=str(

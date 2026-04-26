@@ -1234,6 +1234,16 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         text_start = next(
             event for event in events if event['type'] == 'TEXT_MESSAGE_START'
         )
+        text_start_index = next(
+            index
+            for index, event in enumerate(events)
+            if event['type'] == 'TEXT_MESSAGE_START'
+        )
+        tool_start_index = next(
+            index
+            for index, event in enumerate(events)
+            if event['type'] == 'TOOL_CALL_START'
+        )
         text_deltas = [
             event['delta']
             for event in events
@@ -1245,6 +1255,7 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             {'filters': {'scope': 'all'}},
         )
         self.assertEqual(tool_start['parentMessageId'], text_start['messageId'])
+        self.assertLess(text_start_index, tool_start_index)
         self.assertEqual(text_deltas, ['The answer is 4.'])
 
     async def test_analysis_agent_stream_ag_ui_emits_run_error_event(self) -> None:
