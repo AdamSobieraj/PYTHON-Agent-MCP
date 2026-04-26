@@ -33,6 +33,11 @@ jobs:
           docker version
           docker info
 
+      - name: Validate registry secrets
+        run: |
+          test -n "${{ secrets.REGISTRY_USER }}" || { echo "REGISTRY_USER repository secret is not set"; exit 1; }
+          test -n "${{ secrets.REGISTRY_PASSWORD }}" || { echo "REGISTRY_PASSWORD repository secret is not set"; exit 1; }
+
       - name: Log in to local registry
         run: |
           echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login registry.home.arpa -u "${{ secrets.REGISTRY_USER }}" --password-stdin
