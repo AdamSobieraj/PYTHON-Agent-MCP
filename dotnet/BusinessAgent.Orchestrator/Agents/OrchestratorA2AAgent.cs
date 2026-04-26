@@ -1,4 +1,5 @@
 using System.Text;
+using System.Diagnostics;
 
 using A2A;
 
@@ -24,11 +25,23 @@ public sealed class OrchestratorA2AAgent(
                 "The orchestrator is loading discovery metadata and preparing the request."),
             cancellationToken);
 
+        Activity? agentActivity = null;
         try
         {
-            await runtime.InitializeAsync(cancellationToken);
-
             var requestText = BuildOrchestratorRequest(context);
+            agentActivity = LangfuseTracing.StartAgentActivity(
+                "orchestrator.a2a_request",
+                input: requestText,
+                sessionId: context.ContextId ?? context.TaskId,
+                traceName: "business-agent-orchestrator-a2a",
+                traceMetadata: new Dictionary<string, object?>
+                {
+                    ["task_id"] = context.TaskId,
+                    ["context_id"] = context.ContextId,
+                    ["message_id"] = context.Message?.MessageId,
+                });
+
+            await runtime.InitializeAsync(cancellationToken);
             if (string.IsNullOrWhiteSpace(requestText))
             {
                 await updater.RequireInputAsync(
@@ -46,6 +59,7 @@ public sealed class OrchestratorA2AAgent(
                 result = "The orchestrator completed without returning text output.";
             }
 
+            LangfuseTracing.SetOutput(agentActivity, result, traceLevel: true);
             await updater.AddArtifactAsync(
                 [Part.FromText(result)],
                 name: "orchestrator-response",
@@ -55,10 +69,15 @@ public sealed class OrchestratorA2AAgent(
         }
         catch (Exception ex)
         {
+            LangfuseTracing.MarkError(agentActivity, ex);
             logger.LogError(ex, "The orchestrator failed while handling task {TaskId}", context.TaskId);
             await updater.FailAsync(
                 CreateAgentMessage(context, $"The orchestrator failed: {ex.Message}"),
                 cancellationToken);
+        }
+        finally
+        {
+            agentActivity?.Dispose();
         }
     }
 

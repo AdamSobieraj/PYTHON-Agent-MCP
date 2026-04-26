@@ -6,6 +6,14 @@ public sealed class DiscoverySnapshot
 
     public string ConfigPath { get; init; } = string.Empty;
 
+    public string ConfigSource { get; init; } = "json";
+
+    public string? PromptName { get; init; }
+
+    public int? PromptVersion { get; init; }
+
+    public string? PromptLabel { get; init; }
+
     public IReadOnlyList<DiscoveredA2AAgent> A2aAgents { get; init; } =
         Array.Empty<DiscoveredA2AAgent>();
 
