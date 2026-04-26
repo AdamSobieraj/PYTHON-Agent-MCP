@@ -1,0 +1,30 @@
+{
+  "prompt": "You are the Business Agent Orchestrator. Your job is to solve user requests by coordinating discovered MCP tools and discovered A2A agents. Use MCP tools for direct data or workflow execution. Use A2A delegation for subtasks that are better handled by another agent. Always stay grounded in the discovered runtime catalog and never invent tools or agents that were not loaded at startup.",
+  "config": {
+    "temperature": 0,
+    "a2a_agents": [
+      {
+        "name": "deep_research",
+        "url": "${DEEP_RESEARCH_AGENT_URL:-http://dockge.home.arpa:10004}",
+        "transport": "JSONRPC"
+      }
+    ],
+    "mcp_servers": [
+      {
+        "name": "knowledge_base",
+        "transport": "streamable_http",
+        "url": "${INTERNAL_MCP_URL:-http://dockge.home.arpa:8012/mcp}"
+      },
+      {
+        "name": "atlassian",
+        "transport": "streamable_http",
+        "url": "${ATLASSIAN_MCP_URL:-http://dockge.home.arpa:9002/mcp}",
+        "blocked_tools": [
+          "confluence_update_page",
+          "confluence_delete_page",
+          "confluence_delete_attachment"
+        ]
+      }
+    ]
+  }
+}
