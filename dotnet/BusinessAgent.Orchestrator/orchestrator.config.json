@@ -1,11 +1,55 @@
 {
-  "prompt": "You are the Business Agent Orchestrator. Your job is to solve user requests by coordinating discovered MCP tools and discovered A2A agents. Use MCP tools for direct data or workflow execution. Use A2A delegation for subtasks that are better handled by another agent. Always stay grounded in the discovered runtime catalog and never invent tools or agents that were not loaded at startup.",
+  "agent_card": {
+    "name": "System research Agent",
+    "description": "Helps with deep research and system analysis.",
+    "version": "1.0.0",
+    "provider": {
+      "organization": "Business Agent"
+    },
+    "capabilities": {
+      "streaming": true,
+      "push_notifications": false
+    },
+    "default_input_modes": [
+      "text"
+    ],
+    "default_output_modes": [
+      "text",
+      "task-status"
+    ],
+    "skills": [
+      {
+        "id": "system_analysis",
+        "name": "System Analysis Tool",
+        "description": "Helps with system analysis and research tasks.",
+        "tags": [
+          "system-analysis",
+          "research"
+        ],
+        "examples": [
+          "What is system analysis?"
+        ],
+        "input_modes": [
+          "text"
+        ],
+        "output_modes": [
+          "text",
+          "task-status"
+        ]
+      }
+    ]
+  },  
   "config": {
     "temperature": 0,
     "a2a_agents": [
       {
-        "name": "deep_research",
+        "name": "system_research",
         "url": "${DEEP_RESEARCH_AGENT_URL:-http://dockge.home.arpa:10004}",
+        "transport": "JSONRPC"
+      },
+      {
+        "name": "business_research",
+        "url": "${DEEP_RESEARCH_AGENT_URL:-http://localhost:10004}",
         "transport": "JSONRPC"
       }
     ],
