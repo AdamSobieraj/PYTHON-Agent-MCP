@@ -1,3 +1,4 @@
+import os
 import unittest
 
 from contextlib import contextmanager
@@ -24,6 +25,7 @@ from a2a.types import (
     a2a_pb2_grpc,
 )
 from buissnes_agent.a2a_agent.__main__ import (
+    _apply_runtime_config_to_agent_card,
     _build_agent_card,
     _build_app,
     _build_grpc_server,
@@ -35,6 +37,7 @@ from buissnes_agent.a2a_agent.agent import (
     ResponseFormat,
 )
 from buissnes_agent.a2a_agent.agent_executor import AnalysisAgentExecutor
+from buissnes_agent.a2a_agent.mcp_config import AgentRuntimeConfig
 
 
 class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
@@ -187,6 +190,125 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             },
             payload['supportedInterfaces'],
         )
+
+    def test_build_agent_card_uses_runtime_config_overrides(self) -> None:
+        runtime_config = AgentRuntimeConfig(
+            prompt='test',
+            config={
+                'agent_card': {
+                    'name': 'Audit-backed Analyst',
+                    'description': 'Published from Langfuse prompt config.',
+                    'version': '2.1.0',
+                    'documentation_url': 'https://docs.example.com/agent',
+                    'icon_url': 'https://docs.example.com/icon.png',
+                    'provider': {
+                        'organization': 'Risk Systems',
+                        'url': 'https://agents.example.com',
+                    },
+                    'capabilities': {
+                        'streaming': False,
+                        'push_notifications': True,
+                        'extended_agent_card': True,
+                    },
+                    'skills': [
+                        {
+                            'id': 'audit_analysis',
+                            'name': 'Audit Analysis',
+                            'description': 'Explains audit-backed settings.',
+                            'tags': ['audit', 'analysis'],
+                        }
+                    ],
+                }
+            },
+        )
+
+        agent_card = _build_agent_card(
+            public_host='testserver',
+            http_port=10000,
+            grpc_port=10001,
+            compat_grpc_port=10002,
+            runtime_config=runtime_config,
+        )
+
+        self.assertEqual(agent_card.name, 'Audit-backed Analyst')
+        self.assertEqual(
+            agent_card.description,
+            'Published from Langfuse prompt config.',
+        )
+        self.assertEqual(agent_card.version, '2.1.0')
+        self.assertEqual(
+            agent_card.documentation_url,
+            'https://docs.example.com/agent',
+        )
+        self.assertEqual(
+            agent_card.icon_url,
+            'https://docs.example.com/icon.png',
+        )
+        self.assertEqual(
+            agent_card.provider.organization,
+            'Risk Systems',
+        )
+        self.assertEqual(
+            agent_card.provider.url,
+            'https://agents.example.com',
+        )
+        self.assertFalse(agent_card.capabilities.streaming)
+        self.assertTrue(agent_card.capabilities.push_notifications)
+        self.assertTrue(agent_card.capabilities.extended_agent_card)
+        self.assertEqual(agent_card.skills[0].id, 'audit_analysis')
+        self.assertEqual(
+            list(agent_card.skills[0].input_modes),
+            ['text'],
+        )
+        self.assertEqual(
+            list(agent_card.skills[0].output_modes),
+            ['text', 'task-status'],
+        )
+
+    def test_apply_runtime_config_to_agent_card_updates_existing_card(self) -> None:
+        agent_card = _build_agent_card(
+            public_host='testserver',
+            http_port=10000,
+            grpc_port=10001,
+            compat_grpc_port=10002,
+        )
+        runtime_config = AgentRuntimeConfig(
+            prompt='test',
+            config={
+                'agentCard': {
+                    'name': 'Prompt Config Agent',
+                    'provider': {
+                        'organization': 'Prompt Team',
+                    },
+                    'skills': [
+                        {
+                            'id': 'prompt_skill',
+                            'name': 'Prompt Skill',
+                            'description': 'Defined in prompt config.',
+                            'tags': ['prompt'],
+                            'inputModes': ['text'],
+                            'outputModes': ['text', 'task-status'],
+                        }
+                    ],
+                }
+            },
+        )
+
+        _apply_runtime_config_to_agent_card(
+            agent_card,
+            runtime_config,
+            public_host='testserver',
+            http_port=10000,
+            grpc_port=10001,
+            compat_grpc_port=10002,
+        )
+
+        self.assertEqual(agent_card.name, 'Prompt Config Agent')
+        self.assertEqual(
+            agent_card.provider.organization,
+            'Prompt Team',
+        )
+        self.assertEqual(agent_card.skills[0].id, 'prompt_skill')
 
     async def test_swagger_docs_expose_rest_get_routes(self) -> None:
         async with self._test_client([]) as client:
@@ -506,38 +628,39 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_build_langfuse_request_uses_a2a_identifiers(self) -> None:
-        executor = AnalysisAgentExecutor()
-        executor.agent.create_langfuse_trace_id = (
-            lambda seed: '0123456789abcdef0123456789abcdef'
-        )
+        with patch.dict(os.environ, {'AGENT_SETTINGS': 'Analyst agent'}):
+            executor = AnalysisAgentExecutor()
+            executor.agent.create_langfuse_trace_id = (
+                lambda seed: '0123456789abcdef0123456789abcdef'
+            )
 
-        context = SimpleNamespace(
-            metadata={
-                'langfuse_tags': ['priority'],
-                'langfuse_trace_name': 'Custom request trace',
-            },
-            message=SimpleNamespace(
-                message_id='msg-1',
+            context = SimpleNamespace(
                 metadata={
-                    'customer_id': 'cust-7',
-                    'langfuse_user_id': 'metadata-user',
+                    'langfuse_tags': ['priority'],
+                    'langfuse_trace_name': 'Custom request trace',
                 },
-            ),
-            call_context=SimpleNamespace(
-                user=SimpleNamespace(
-                    is_authenticated=True,
-                    user_name='auth-user',
-                )
-            ),
-            tenant='tenant-a',
-        )
+                message=SimpleNamespace(
+                    message_id='msg-1',
+                    metadata={
+                        'customer_id': 'cust-7',
+                        'langfuse_user_id': 'metadata-user',
+                    },
+                ),
+                call_context=SimpleNamespace(
+                    user=SimpleNamespace(
+                        is_authenticated=True,
+                        user_name='auth-user',
+                    )
+                ),
+                tenant='tenant-a',
+            )
 
-        request = executor._build_langfuse_request(
-            context,
-            'Inspect this account',
-            task_id='task-1',
-            context_id='ctx-1',
-        )
+            request = executor._build_langfuse_request(
+                context,
+                'Inspect this account',
+                task_id='task-1',
+                context_id='ctx-1',
+            )
 
         self.assertEqual(
             request.trace_id,
@@ -555,6 +678,34 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             request.langchain_metadata['a2a_message_id'],
             'msg-1',
+        )
+        self.assertEqual(
+            request.trace_metadata['agent_settings'],
+            'Analyst agent',
+        )
+
+    def test_build_langfuse_request_reads_agent_settings_from_runtime_env(self) -> None:
+        executor = AnalysisAgentExecutor()
+        executor.agent.create_langfuse_trace_id = lambda seed: None
+
+        context = SimpleNamespace(
+            metadata={},
+            message=SimpleNamespace(message_id='msg-1', metadata={}),
+            call_context=SimpleNamespace(user=None),
+            tenant='tenant-a',
+        )
+
+        with patch.dict(os.environ, {'AGENT_SETTINGS': 'Analyst Workstation'}):
+            request = executor._build_langfuse_request(
+                context,
+                'Inspect this account',
+                task_id='task-1',
+                context_id='ctx-1',
+            )
+
+        self.assertEqual(
+            request.trace_metadata['agent_settings'],
+            'Analyst Workstation',
         )
 
     def test_build_langfuse_request_prefers_explicit_session_id(self) -> None:
@@ -663,6 +814,39 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config['metadata']['langfuse_user_id'], 'user-1')
         self.assertEqual(config['metadata']['a2a_task_id'], 'task-1')
         self.assertNotIn('langfuse_prompt', config['metadata'])
+
+    def test_load_runtime_config_reads_agent_settings_from_runtime_env(self) -> None:
+        class FakeLangfuseClient:
+            def __init__(self) -> None:
+                self.prompt_calls: list[tuple[str, str]] = []
+
+            def get_prompt(self, name: str, *, label: str):
+                self.prompt_calls.append((name, label))
+                return SimpleNamespace(
+                    prompt='Use careful banking language.',
+                    config={
+                        'agent_card': {
+                            'name': 'System research Agent',
+                        }
+                    },
+                )
+
+        agent = AnalysisAgent()
+        agent._langfuse_initialized = True
+        agent.langfuse_enabled = True
+        agent.langfuse = FakeLangfuseClient()
+
+        with patch.dict(os.environ, {'AGENT_SETTINGS': 'Analyst Workstation'}):
+            runtime_config = agent._load_runtime_config()
+
+        self.assertEqual(
+            agent.langfuse.prompt_calls,
+            [('Analyst Workstation', 'production')],
+        )
+        self.assertEqual(
+            runtime_config.config.agent_card.name,
+            'System research Agent',
+        )
 
     async def test_analysis_agent_stream_updates_langfuse_request_span(self) -> None:
         class FakeHandler:

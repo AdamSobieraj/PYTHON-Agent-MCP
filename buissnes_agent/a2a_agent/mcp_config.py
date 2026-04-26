@@ -287,10 +287,95 @@ class McpServerConfig(BaseModel):
         }
 
 
+class AgentCardProviderConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    organization: str | None = None
+    url: str | None = None
+
+
+class AgentCardCapabilitiesConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    streaming: bool | None = None
+    push_notifications: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "push_notifications",
+            "pushNotifications",
+        ),
+    )
+    extended_agent_card: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "extended_agent_card",
+            "extendedAgentCard",
+        ),
+    )
+
+
+class AgentCardSkillConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    id: str
+    name: str
+    description: str
+    tags: list[str] = Field(default_factory=list)
+    examples: list[str] | None = None
+    input_modes: list[str] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("input_modes", "inputModes"),
+    )
+    output_modes: list[str] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("output_modes", "outputModes"),
+    )
+
+
+class AgentCardConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    name: str | None = None
+    description: str | None = None
+    version: str | None = None
+    documentation_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "documentation_url",
+            "documentationUrl",
+        ),
+    )
+    icon_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("icon_url", "iconUrl"),
+    )
+    provider: AgentCardProviderConfig | None = None
+    capabilities: AgentCardCapabilitiesConfig | None = None
+    default_input_modes: list[str] | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "default_input_modes",
+            "defaultInputModes",
+        ),
+    )
+    default_output_modes: list[str] | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "default_output_modes",
+            "defaultOutputModes",
+        ),
+    )
+    skills: list[AgentCardSkillConfig] | None = None
+
+
 class AgentModelConfig(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     temperature: float = 0
+    agent_card: AgentCardConfig | None = Field(
+        default=None,
+        validation_alias=AliasChoices("agent_card", "agentCard"),
+    )
     mcp_servers: list[McpServerConfig] | None = Field(
         default=None,
         validation_alias=AliasChoices("mcp_servers", "mcpServers"),

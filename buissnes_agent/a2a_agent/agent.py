@@ -5,7 +5,7 @@ import os
 import re
 
 from collections import Counter
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
@@ -44,13 +44,20 @@ except ImportError:
 logger = logging.getLogger(__name__)
 memory = MemorySaver()
 
-AGENT_SETTINGS = os.getenv('AGENT_SETTINGS', 'Analyst agent')
+DEFAULT_AGENT_SETTINGS = 'Analyst agent'
 SSL_VERIFY = os.getenv('SSL_VERIFY', 'False').lower() in ('true', '1', 't')
 
 MAX_STATUS_TEXT_LENGTH = 280
 MAX_TOOL_ARG_PREVIEW_LENGTH = 220
 MAX_TOOL_RESULT_PREVIEW_LENGTH = 200
 LANGFUSE_TRACE_ID_PATTERN = re.compile(r'^[0-9a-f]{32}$')
+
+
+def get_agent_settings_name() -> str:
+    configured_name = os.getenv('AGENT_SETTINGS')
+    if configured_name is None:
+        return DEFAULT_AGENT_SETTINGS
+    return configured_name
 
 
 class AgentStreamItem(TypedDict, total=False):
@@ -321,6 +328,9 @@ class AnalysisAgent:
         self._langfuse_callback_handler_cls = None
         self._langfuse_propagate_attributes = None
         self._last_prompt_source = 'local_default'
+        self._runtime_config_listeners: list[
+            Callable[[AgentRuntimeConfig], None]
+        ] = []
 
     def _initialize_langfuse(self) -> None:
         if self._langfuse_initialized:
@@ -436,9 +446,10 @@ class AnalysisAgent:
         self._initialize_langfuse()
         self._langfuse_prompt = None
         if self.langfuse_enabled and self.langfuse is not None:
+            agent_settings = get_agent_settings_name()
             try:
                 prompt = self.langfuse.get_prompt(
-                    AGENT_SETTINGS,
+                    agent_settings,
                     label='production',
                 )
                 self._langfuse_prompt = prompt
@@ -451,12 +462,12 @@ class AnalysisAgent:
                 if self.runtime_config is not None:
                     logger.exception(
                         "Failed to load Langfuse prompt '%s'. Reusing the last applied configuration.",
-                        AGENT_SETTINGS,
+                        agent_settings,
                     )
                     return self.runtime_config
                 logger.exception(
                     "Failed to load Langfuse prompt '%s'. Falling back to local config.",
-                    AGENT_SETTINGS,
+                    agent_settings,
                 )
 
         with open(
@@ -512,6 +523,27 @@ class AnalysisAgent:
             ],
             metadata=prompt_metadata,
         )
+
+    def load_runtime_config_snapshot(self) -> AgentRuntimeConfig:
+        return self._load_runtime_config()
+
+    def register_runtime_config_listener(
+        self,
+        listener: Callable[[AgentRuntimeConfig], None],
+    ) -> None:
+        self._runtime_config_listeners.append(listener)
+
+    def _notify_runtime_config_listeners(
+        self,
+        runtime_config: AgentRuntimeConfig,
+    ) -> None:
+        for listener in list(self._runtime_config_listeners):
+            try:
+                listener(runtime_config)
+            except Exception:
+                logger.exception(
+                    'A runtime configuration listener failed while applying updated settings.'
+                )
 
     async def _load_server_tools(
         self,
@@ -669,6 +701,7 @@ class AnalysisAgent:
             self.graph = new_graph
             self.toolsets = new_toolsets
             self._log_duplicate_tool_names()
+            self._notify_runtime_config_listeners(runtime_config)
 
             if previous_toolsets:
                 self._stale_toolsets.extend(previous_toolsets)

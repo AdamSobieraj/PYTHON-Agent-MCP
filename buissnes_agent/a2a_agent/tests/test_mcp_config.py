@@ -84,6 +84,57 @@ class McpConfigTests(unittest.TestCase):
         self.assertEqual(len(servers), 1)
         self.assertEqual(servers[0].blocked_plugins, ["confluence_comments"])
 
+    def test_runtime_config_accepts_camel_case_agent_card_keys(self) -> None:
+        runtime_config = AgentRuntimeConfig(
+            prompt="test",
+            config={
+                "agentCard": {
+                    "name": "Audit-backed Analyst",
+                    "documentationUrl": "https://docs.example.com/agent",
+                    "defaultInputModes": ["text"],
+                    "defaultOutputModes": ["text", "task-status"],
+                    "provider": {
+                        "organization": "Risk Systems",
+                    },
+                    "capabilities": {
+                        "pushNotifications": True,
+                        "extendedAgentCard": True,
+                    },
+                    "skills": [
+                        {
+                            "id": "audit_analysis",
+                            "name": "Audit Analysis",
+                            "description": "Explains audit-backed settings.",
+                            "tags": ["audit", "analysis"],
+                            "inputModes": ["text"],
+                            "outputModes": ["text", "task-status"],
+                        }
+                    ],
+                }
+            },
+        )
+
+        agent_card = runtime_config.config.agent_card
+        self.assertIsNotNone(agent_card)
+        assert agent_card is not None
+        self.assertEqual(agent_card.name, "Audit-backed Analyst")
+        self.assertEqual(
+            agent_card.documentation_url,
+            "https://docs.example.com/agent",
+        )
+        self.assertEqual(agent_card.default_input_modes, ["text"])
+        self.assertEqual(
+            agent_card.default_output_modes,
+            ["text", "task-status"],
+        )
+        self.assertEqual(
+            agent_card.provider.organization,
+            "Risk Systems",
+        )
+        self.assertTrue(agent_card.capabilities.push_notifications)
+        self.assertTrue(agent_card.capabilities.extended_agent_card)
+        self.assertEqual(agent_card.skills[0].input_modes, ["text"])
+
     def test_server_config_rejects_both_tool_filter_modes(self) -> None:
         with self.assertRaises(ValidationError):
             McpServerConfig(
