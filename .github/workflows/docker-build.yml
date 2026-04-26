@@ -1,0 +1,46 @@
+name: Docker Build And Push
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: registry.home.arpa/executeit/python-agent-mcp
+
+jobs:
+  docker-build-and-push:
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - homelab-docker
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Show Docker info
+        run: |
+          docker version
+          docker info
+
+      - name: Log in to local registry
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login registry.home.arpa -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+
+      - name: Build image
+        run: |
+          docker build -t "${IMAGE_NAME}:latest" .
+
+      - name: Push image
+        run: |
+          docker push "${IMAGE_NAME}:latest"
