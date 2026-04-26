@@ -42,15 +42,15 @@ from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
 from a2a.utils.proto_utils import parse_params
 
 try:
-    from .ag_ui import AG_UI_MEDIA_TYPE, RunAgentInput, encode_sse_event
+    from .ag_ui import AG_UI_MEDIA_TYPE, EventEncoder, RunAgentInput
     from .agent import AnalysisAgent
     from .agent_executor import AnalysisAgentExecutor
     from .mcp_config import AgentRuntimeConfig
 except ImportError:
     from buissnes_agent.a2a_agent.ag_ui import (  # type: ignore
         AG_UI_MEDIA_TYPE,
+        EventEncoder,
         RunAgentInput,
-        encode_sse_event,
     )
     from buissnes_agent.a2a_agent.agent import AnalysisAgent  # type: ignore
     from buissnes_agent.a2a_agent.agent_executor import AnalysisAgentExecutor  # type: ignore
@@ -418,6 +418,7 @@ def _build_app(
 
     async def _stream_ag_ui_response(
         input_data: RunAgentInput,
+        request: Request,
     ) -> StreamingResponse:
         if not input_data.messages:
             raise HTTPException(
@@ -431,13 +432,15 @@ def _build_app(
                 detail='AG-UI requests require a user text message.',
             )
 
+        encoder = EventEncoder(accept=request.headers.get('accept'))
+
         async def event_generator():
             async for event in agent_executor.agent.stream_ag_ui(input_data):
-                yield encode_sse_event(event)
+                yield encoder.encode(event)
 
         return StreamingResponse(
             event_generator(),
-            media_type=AG_UI_MEDIA_TYPE,
+            media_type=encoder.get_content_type(),
             headers={
                 'Cache-Control': 'no-cache',
                 'Connection': 'keep-alive',
@@ -516,18 +519,27 @@ def _build_app(
         '/ag-ui',
         tags=['AG-UI'],
         summary='Run the agent over AG-UI',
-        description='Accepts AG-UI RunAgentInput payloads and streams AG-UI events over Server-Sent Events.',
+        description='Accepts AG-UI RunAgentInput payloads and streams AG-UI events with accept-aware encoding.',
     )
-    async def run_ag_ui(input_data: RunAgentInput) -> StreamingResponse:
-        return await _stream_ag_ui_response(input_data)
+    async def run_ag_ui(
+        input_data: RunAgentInput,
+        request: Request,
+    ) -> StreamingResponse:
+        return await _stream_ag_ui_response(input_data, request)
 
     @app.post('/agui', include_in_schema=False)
-    async def run_ag_ui_alias(input_data: RunAgentInput) -> StreamingResponse:
-        return await _stream_ag_ui_response(input_data)
+    async def run_ag_ui_alias(
+        input_data: RunAgentInput,
+        request: Request,
+    ) -> StreamingResponse:
+        return await _stream_ag_ui_response(input_data, request)
 
     @app.post('/', include_in_schema=False)
-    async def run_ag_ui_root(input_data: RunAgentInput) -> StreamingResponse:
-        return await _stream_ag_ui_response(input_data)
+    async def run_ag_ui_root(
+        input_data: RunAgentInput,
+        request: Request,
+    ) -> StreamingResponse:
+        return await _stream_ag_ui_response(input_data, request)
 
     _add_documented_rest_get_routes(
         app=app,

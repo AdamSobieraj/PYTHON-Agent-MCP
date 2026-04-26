@@ -16,6 +16,7 @@ import openai
 from google.protobuf.json_format import MessageToDict
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.utils.function_calling import convert_to_openai_function
 
 from a2a.types import (
     Message,
@@ -37,6 +38,7 @@ from buissnes_agent.a2a_agent.ag_ui import (
     RunAgentInput,
     RunFinishedEvent,
     RunStartedEvent,
+    StateSnapshotEvent,
     TextMessageContentEvent,
     TextMessageEndEvent,
     TextMessageStartEvent,
@@ -561,6 +563,110 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload['mcpTools'][0]['toolName'], 'search_docs')
         self.assertEqual(payload['warnings'], [])
 
+    async def test_ag_ui_endpoint_respects_ndjson_accept_header(self) -> None:
+        async def fake_stream_ag_ui(
+            _self: AnalysisAgent,
+            run_input: RunAgentInput,
+        ):
+            yield RunStartedEvent(
+                thread_id=run_input.thread_id,
+                run_id=run_input.run_id,
+            )
+            yield StateSnapshotEvent(snapshot={'mode': 'ndjson'})
+            yield RunFinishedEvent(
+                thread_id=run_input.thread_id,
+                run_id=run_input.run_id,
+            )
+
+        with (
+            patch.object(AnalysisAgent, 'stream_ag_ui', new=fake_stream_ag_ui),
+            patch.object(AnalysisAgentExecutor, 'startup', new=AsyncMock()),
+            patch.object(AnalysisAgentExecutor, 'shutdown', new=AsyncMock()),
+        ):
+            agent_card = _build_agent_card(
+                public_host='testserver',
+                http_port=10000,
+                grpc_port=10001,
+                compat_grpc_port=10002,
+            )
+            agent_executor = AnalysisAgentExecutor()
+            request_handler = _build_request_handler(
+                agent_card,
+                agent_executor,
+            )
+            app = _build_app(agent_card, request_handler, agent_executor)
+
+            async with app.router.lifespan_context(app):
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url='http://testserver',
+                ) as client:
+                    response = await client.post(
+                        '/ag-ui',
+                        headers={'accept': 'application/json'},
+                        json={
+                            'threadId': 'thread-1',
+                            'runId': 'run-1',
+                            'messages': [
+                                {
+                                    'id': 'user-1',
+                                    'role': 'user',
+                                    'content': 'hello',
+                                }
+                            ],
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            response.headers['content-type'].startswith(
+                'application/x-ndjson'
+            )
+        )
+        self.assertFalse(response.text.startswith('data: '))
+        first_line = response.text.splitlines()[0]
+        self.assertEqual(json.loads(first_line)['type'], 'RUN_STARTED')
+
+    async def test_ag_ui_endpoint_rejects_missing_messages(self) -> None:
+        with (
+            patch.object(AnalysisAgentExecutor, 'startup', new=AsyncMock()),
+            patch.object(AnalysisAgentExecutor, 'shutdown', new=AsyncMock()),
+        ):
+            agent_card = _build_agent_card(
+                public_host='testserver',
+                http_port=10000,
+                grpc_port=10001,
+                compat_grpc_port=10002,
+            )
+            agent_executor = AnalysisAgentExecutor()
+            request_handler = _build_request_handler(
+                agent_card,
+                agent_executor,
+            )
+            app = _build_app(agent_card, request_handler, agent_executor)
+
+            async with app.router.lifespan_context(app):
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url='http://testserver',
+                ) as client:
+                    response = await client.post(
+                        '/ag-ui',
+                        json={
+                            'threadId': 'thread-1',
+                            'runId': 'run-1',
+                            'messages': [],
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()['detail'],
+            'AG-UI requests require at least one message.',
+        )
+
     async def test_ag_ui_endpoint_rejects_missing_user_text(self) -> None:
         with (
             patch.object(AnalysisAgentExecutor, 'startup', new=AsyncMock()),
@@ -950,7 +1056,9 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             events.append(event.model_dump(by_alias=True, exclude_none=True))
 
         self.assertEqual(events[0]['type'], 'RUN_STARTED')
-        self.assertEqual(events[1]['type'], 'STEP_STARTED')
+        self.assertEqual(events[1]['type'], 'STATE_SNAPSHOT')
+        self.assertEqual(events[1]['snapshot'], {})
+        self.assertEqual(events[2]['type'], 'STEP_STARTED')
         self.assertIn(
             'ACTIVITY_SNAPSHOT',
             [event['type'] for event in events],
@@ -963,25 +1071,142 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             events[-1]['result']['taskState'],
             'completed',
         )
+        activity_messages = [
+            event['content']['message']
+            for event in events
+            if event['type'] == 'ACTIVITY_SNAPSHOT'
+        ]
+        self.assertIn(
+            'Planning the next action: search_docs.',
+            activity_messages,
+        )
+        self.assertIn(
+            'Reviewing tool results...',
+            activity_messages,
+        )
+        self.assertTrue(
+            all(
+                event.get('replace') is True
+                for event in events
+                if event['type'] == 'ACTIVITY_SNAPSHOT'
+            )
+        )
         text_deltas = [
             event['delta']
             for event in events
             if event['type'] == 'TEXT_MESSAGE_CONTENT'
         ]
-        self.assertIn(
-            'Planning the next action: search_docs.',
+        self.assertEqual(
             text_deltas,
+            ['Looking up the answer. ', 'Final answer ready.'],
         )
-        self.assertIn(
-            'Reviewing tool results...',
-            text_deltas,
-        )
-        self.assertIn('Looking up the answer. ', text_deltas)
-        self.assertIn('Final answer ready.', text_deltas)
         self.assertEqual(agent.graph.stream_mode, ['messages', 'updates', 'custom'])
         self.assertEqual(agent.graph.version, 'v2')
         self.assertEqual(len(agent.graph.inputs['messages']), 1)
         self.assertEqual(agent.graph.inputs['messages'][0].type, 'human')
+
+    async def test_analysis_agent_stream_ag_ui_parents_tool_calls_before_text(
+        self,
+    ) -> None:
+        class FakeGraph:
+            async def astream(
+                self,
+                inputs: dict[str, Any],
+                config: dict[str, Any],
+                stream_mode: list[str],
+                version: str,
+            ):
+                yield {
+                    'type': 'updates',
+                    'data': {
+                        'agent': {
+                            'messages': [
+                                AIMessage(
+                                    content='',
+                                    tool_calls=[
+                                        {
+                                            'name': 'calculator',
+                                            'args': {'expression': '2+2'},
+                                            'id': 'call-42',
+                                        }
+                                    ],
+                                )
+                            ]
+                        }
+                    },
+                }
+                yield {
+                    'type': 'updates',
+                    'data': {
+                        'tools': {
+                            'messages': [
+                                ToolMessage(
+                                    content='4',
+                                    tool_call_id='call-42',
+                                    id='tool-msg-42',
+                                )
+                            ]
+                        }
+                    },
+                }
+                yield {
+                    'type': 'messages',
+                    'data': (
+                        AIMessage(content='The answer is 4.'),
+                        {'langgraph_node': 'agent'},
+                    ),
+                }
+
+            async def aget_state(self, config: dict[str, Any]):
+                return SimpleNamespace(
+                    values={
+                        'messages': [AIMessage(content='The answer is 4.')],
+                        'structured_response': ResponseFormat(
+                            status='completed',
+                            message='The answer is 4.',
+                        ),
+                    }
+                )
+
+        agent = AnalysisAgent()
+        agent.graph = FakeGraph()
+        agent._langfuse_initialized = True
+        agent.langfuse_enabled = False
+
+        run_input = RunAgentInput(
+            thread_id='thread-42',
+            run_id='run-42',
+            state={'filters': {'scope': 'all'}},
+            messages=[
+                AgUiMessage(id='user-1', role='user', content='2+2=?')
+            ],
+        )
+
+        events = []
+        async for event in agent.stream_ag_ui(run_input):
+            events.append(event.model_dump(by_alias=True, exclude_none=True))
+
+        state_snapshot = next(
+            event for event in events if event['type'] == 'STATE_SNAPSHOT'
+        )
+        tool_start = next(
+            event for event in events if event['type'] == 'TOOL_CALL_START'
+        )
+        text_start = next(
+            event for event in events if event['type'] == 'TEXT_MESSAGE_START'
+        )
+        text_deltas = [
+            event['delta']
+            for event in events
+            if event['type'] == 'TEXT_MESSAGE_CONTENT'
+        ]
+
+        self.assertEqual(
+            state_snapshot['snapshot'],
+            {'filters': {'scope': 'all'}},
+        )
+        self.assertEqual(tool_start['parentMessageId'], text_start['messageId'])
+        self.assertEqual(text_deltas, ['The answer is 4.'])
 
     async def test_analysis_agent_stream_ag_ui_emits_run_error_event(self) -> None:
         class FailingGraph:
@@ -1049,6 +1274,40 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
             response['status_message'],
             'Short completion summary.',
         )
+
+    async def test_get_agent_response_accepts_dict_structured_response(
+        self,
+    ) -> None:
+        agent = AnalysisAgent()
+        agent.graph = SimpleNamespace(
+            aget_state=AsyncMock(
+                return_value=SimpleNamespace(
+                    values={
+                        'messages': [AIMessage(content='The answer is 4.')],
+                        'structured_response': {
+                            'status': 'completed',
+                            'message': 'The answer is 4.',
+                        },
+                    }
+                )
+            )
+        )
+        agent._langfuse_initialized = True
+        agent.langfuse_enabled = False
+
+        response = await agent.get_agent_response({'configurable': {}})
+
+        self.assertEqual(response['task_state'], 'completed')
+        self.assertEqual(response['content'], 'The answer is 4.')
+        self.assertEqual(response['status_message'], 'The answer is 4.')
+
+    def test_response_format_schema_is_openai_function_compatible(self) -> None:
+        function_schema = convert_to_openai_function(
+            AnalysisAgent.RESPONSE_FORMAT_SCHEMA
+        )
+
+        self.assertEqual(function_schema['name'], 'ResponseFormat')
+        self.assertIn('parameters', function_schema)
 
     def test_build_langfuse_request_uses_a2a_identifiers(self) -> None:
         with patch.dict(os.environ, {'AGENT_SETTINGS': 'Analyst agent'}):

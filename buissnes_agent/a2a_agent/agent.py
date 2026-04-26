@@ -38,6 +38,7 @@ try:
         RunErrorEvent,
         RunFinishedEvent,
         RunStartedEvent,
+        StateSnapshotEvent,
         StepFinishedEvent,
         StepStartedEvent,
         TextMessageContentEvent,
@@ -66,6 +67,7 @@ except ImportError:
         RunErrorEvent,
         RunFinishedEvent,
         RunStartedEvent,
+        StateSnapshotEvent,
         StepFinishedEvent,
         StepStartedEvent,
         TextMessageContentEvent,
@@ -123,7 +125,7 @@ class ResponseFormat(BaseModel):
 
 
 memory = MemorySaver(
-    serde=JsonPlusSerializer().with_msgpack_allowlist([ResponseFormat])
+    serde=JsonPlusSerializer(allowed_msgpack_modules=[ResponseFormat])
 )
 
 
@@ -373,6 +375,29 @@ class AnalysisAgent:
         'Set response status to error if there is an error while processing the request. '
         'Set response status to completed if the request is complete.'
     )
+    RESPONSE_FORMAT_SCHEMA = {
+        'title': 'ResponseFormat',
+        'description': (
+            'Structured summary of the agent result for downstream protocols.'
+        ),
+        'type': 'object',
+        'properties': {
+            'status': {
+                'type': 'string',
+                'enum': ['input_required', 'completed', 'error'],
+                'description': (
+                    'Whether the agent completed the request, needs more input, '
+                    'or encountered an error.'
+                ),
+            },
+            'message': {
+                'type': 'string',
+                'description': 'A concise natural-language summary for the user.',
+            },
+        },
+        'required': ['status', 'message'],
+        'additionalProperties': False,
+    }
 
     SUPPORTED_CONTENT_TYPES = ['text']
 
@@ -751,7 +776,10 @@ class AnalysisAgent:
                     tools=new_tools,
                     checkpointer=memory,
                     prompt=self._build_agent_prompt(runtime_config.prompt),
-                    response_format=(self.FORMAT_INSTRUCTION, ResponseFormat),
+                    response_format=(
+                        self.FORMAT_INSTRUCTION,
+                        self.RESPONSE_FORMAT_SCHEMA,
+                    ),
                 )
             except Exception:
                 await self._close_toolsets(new_toolsets)
@@ -1425,34 +1453,38 @@ class AnalysisAgent:
         *,
         message_id: str,
     ) -> ActivitySnapshotEvent:
+        metadata = dict(item.get('metadata') or {})
+        phase = str(metadata.get('phase') or '').strip().lower()
+        activity_type = {
+            'initializing': 'SYSTEM',
+            'reloading': 'SYSTEM',
+            'planning': 'PLAN',
+            'tool_started': 'TOOL',
+            'tool_finished': 'TOOL',
+            'tool_failed': 'TOOL',
+            'tool_result': 'TOOL_RESULT',
+            'tool_result_error': 'TOOL_RESULT',
+            'finalizing': 'RESPONSE',
+        }.get(phase, 'AGENT_STATUS')
         return ActivitySnapshotEvent(
             message_id=message_id,
-            activity_type='AGENT_STATUS',
+            activity_type=activity_type,
             content={
                 'taskState': item.get('task_state'),
                 'message': item.get('status_message') or item.get('content'),
                 'content': item.get('content'),
-                'metadata': item.get('metadata') or {},
+                'metadata': metadata,
             },
-            replace=False,
+            replace=True,
         )
 
-    def _status_item_to_ag_ui_text_events(
+    def _ag_ui_state_snapshot(
         self,
-        item: AgentStreamItem,
-    ) -> list[Any]:
-        content = str(
-            item.get('status_message') or item.get('content') or ''
-        ).strip()
-        if not content:
-            return []
-
-        message_id = str(uuid4())
-        return [
-            TextMessageStartEvent(message_id=message_id),
-            TextMessageContentEvent(message_id=message_id, delta=content),
-            TextMessageEndEvent(message_id=message_id),
-        ]
+        run_input: RunAgentInput,
+    ) -> Any:
+        if run_input.state is None:
+            return {}
+        return self._json_safe(run_input.state)
 
     def _should_emit_ag_ui_message_chunk(
         self,
@@ -1493,6 +1525,9 @@ class AnalysisAgent:
                 run_id=run_input.run_id,
                 parent_run_id=run_input.parent_run_id,
             )
+            yield StateSnapshotEvent(
+                snapshot=self._ag_ui_state_snapshot(run_input)
+            )
             yield StepStartedEvent(step_name='agent_execution')
 
             try:
@@ -1501,8 +1536,6 @@ class AnalysisAgent:
                         item,
                         message_id=activity_message_id,
                     )
-                    for event in self._status_item_to_ag_ui_text_events(item):
-                        yield event
 
                 if root_span is not None:
                     self._update_request_trace(
@@ -1579,11 +1612,7 @@ class AnalysisAgent:
                                             tool_call_name=str(
                                                 tool_call.get('name') or 'tool'
                                             ),
-                                            parent_message_id=(
-                                                assistant_message_id
-                                                if text_started
-                                                else None
-                                            ),
+                                            parent_message_id=assistant_message_id,
                                         )
                                         yield ToolCallArgsEvent(
                                             tool_call_id=tool_call_id,
@@ -1625,10 +1654,6 @@ class AnalysisAgent:
                                 item,
                                 message_id=activity_message_id,
                             )
-                            for event in self._status_item_to_ag_ui_text_events(
-                                item
-                            ):
-                                yield event
 
                 final_item = await self.get_agent_response(config)
                 final_output = str(
@@ -1820,7 +1845,9 @@ class AnalysisAgent:
                 if last_ai_message:
                     break
 
-        structured_response = current_state.values.get('structured_response')
+        structured_response = self._coerce_structured_response(
+            current_state.values.get('structured_response')
+        )
         final_content = last_ai_message
         final_status_message: str | None = None
         final_state: Literal[
@@ -1869,3 +1896,19 @@ class AnalysisAgent:
             },
             truncate_content=False,
         )
+
+    def _coerce_structured_response(
+        self,
+        value: Any,
+    ) -> ResponseFormat | None:
+        if isinstance(value, ResponseFormat):
+            return value
+        if isinstance(value, dict):
+            try:
+                return ResponseFormat.model_validate(value)
+            except Exception:
+                logger.warning(
+                    'Ignoring invalid structured_response payload: %r',
+                    value,
+                )
+        return None

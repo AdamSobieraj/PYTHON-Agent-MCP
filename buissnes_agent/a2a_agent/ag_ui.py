@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 AG_UI_MEDIA_TYPE = 'text/event-stream'
+AG_UI_NDJSON_MEDIA_TYPE = 'application/x-ndjson'
 
 
 def _to_camel(value: str) -> str:
@@ -33,6 +34,17 @@ class ToolCall(AgUiBaseModel):
     function: FunctionCall
 
 
+class Context(AgUiBaseModel):
+    description: str
+    value: Any
+
+
+class Tool(AgUiBaseModel):
+    name: str
+    description: str | None = None
+    parameters: Any = None
+
+
 class Message(AgUiBaseModel):
     id: str | None = None
     role: str
@@ -40,6 +52,7 @@ class Message(AgUiBaseModel):
     name: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
     tool_call_id: str | None = None
+    activity_type: str | None = None
     error: str | None = None
     metadata: dict[str, Any] | None = None
     encrypted_value: str | None = None
@@ -49,11 +62,11 @@ class RunAgentInput(AgUiBaseModel):
     thread_id: str
     run_id: str
     parent_run_id: str | None = None
-    state: Any = None
+    state: Any = Field(default_factory=dict)
     messages: list[Message] = Field(default_factory=list)
-    tools: list[dict[str, Any]] = Field(default_factory=list)
-    context: list[dict[str, Any]] = Field(default_factory=list)
-    forwarded_props: Any = None
+    tools: list[Tool] = Field(default_factory=list)
+    context: list[Context] = Field(default_factory=list)
+    forwarded_props: Any = Field(default_factory=dict)
 
 
 class BaseEvent(AgUiBaseModel):
@@ -153,17 +166,40 @@ class ToolCallResultEvent(BaseEvent):
     role: Literal['tool'] | None = 'tool'
 
 
+class StateSnapshotEvent(BaseEvent):
+    type: Literal['STATE_SNAPSHOT'] = 'STATE_SNAPSHOT'
+    snapshot: Any
+
+
+class StateDeltaEvent(BaseEvent):
+    type: Literal['STATE_DELTA'] = 'STATE_DELTA'
+    delta: list[Any]
+
+
+class MessagesSnapshotEvent(BaseEvent):
+    type: Literal['MESSAGES_SNAPSHOT'] = 'MESSAGES_SNAPSHOT'
+    messages: list[Message]
+
+
 class ActivitySnapshotEvent(BaseEvent):
     type: Literal['ACTIVITY_SNAPSHOT'] = 'ACTIVITY_SNAPSHOT'
     message_id: str
     activity_type: str
-    content: dict[str, Any]
-    replace: bool = False
+    content: Any
+    replace: bool = True
 
 
-class StateSnapshotEvent(BaseEvent):
-    type: Literal['STATE_SNAPSHOT'] = 'STATE_SNAPSHOT'
-    snapshot: dict[str, Any]
+class ActivityDeltaEvent(BaseEvent):
+    type: Literal['ACTIVITY_DELTA'] = 'ACTIVITY_DELTA'
+    message_id: str
+    activity_type: str
+    patch: list[Any]
+
+
+class RawEvent(BaseEvent):
+    type: Literal['RAW'] = 'RAW'
+    event: Any
+    source: str | None = None
 
 
 class CustomEvent(BaseEvent):
@@ -172,11 +208,34 @@ class CustomEvent(BaseEvent):
     value: Any
 
 
+class EventEncoder:
+    def __init__(self, accept: str | None = None) -> None:
+        accept_value = (accept or '').lower()
+        self._use_sse = (
+            not accept_value
+            or AG_UI_MEDIA_TYPE in accept_value
+            or '*/*' in accept_value
+        )
+
+    def encode(self, event: BaseEvent) -> str:
+        payload = event.model_dump(by_alias=True, exclude_none=True)
+        body = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(',', ':'),
+        )
+        if self._use_sse:
+            return f'data: {body}\n\n'
+        return f'{body}\n'
+
+    def get_content_type(self) -> str:
+        if self._use_sse:
+            return AG_UI_MEDIA_TYPE
+        return AG_UI_NDJSON_MEDIA_TYPE
+
+
 def encode_sse_event(event: BaseEvent) -> str:
-    payload = event.model_dump(by_alias=True, exclude_none=True)
-    return (
-        f'data: {json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}\n\n'
-    )
+    return EventEncoder().encode(event)
 
 
 def flatten_text_content(content: Any) -> str:
@@ -199,10 +258,17 @@ def flatten_text_content(content: Any) -> str:
         if hasattr(source, 'model_dump'):
             source = source.model_dump(exclude_none=True)
         if isinstance(source, dict):
+            source_type = str(source.get('type') or '').strip().lower()
             source_value = source.get('value') or source.get('url')
-            if isinstance(source_value, str) and source_value.strip():
-                label = part_type or 'input'
+            label = part_type or 'input'
+            if (
+                source_type == 'url'
+                and isinstance(source_value, str)
+                and source_value.strip()
+            ):
                 return f'[{label}: {source_value.strip()}]'
+            if source_type == 'data':
+                return f'[{label}: inline content]'
 
         text = content.get('text')
         if isinstance(text, str):
