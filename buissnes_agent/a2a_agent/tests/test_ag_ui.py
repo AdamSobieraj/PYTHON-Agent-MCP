@@ -1,7 +1,7 @@
 import unittest
 import json
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from buissnes_agent.a2a_agent.ag_ui import (
     AG_UI_MEDIA_TYPE,
@@ -47,7 +47,8 @@ class AgUiProtocolTests(unittest.TestCase):
         )
 
         sse_encoder = EventEncoder(accept='text/event-stream')
-        ndjson_encoder = EventEncoder(accept='application/json')
+        ndjson_encoder = EventEncoder(accept='application/json, */*')
+        explicit_ndjson_encoder = EventEncoder(accept='application/x-ndjson')
 
         self.assertEqual(sse_encoder.get_content_type(), AG_UI_MEDIA_TYPE)
         self.assertTrue(sse_encoder.encode(event).startswith('data: '))
@@ -56,6 +57,10 @@ class AgUiProtocolTests(unittest.TestCase):
             'application/x-ndjson',
         )
         self.assertFalse(ndjson_encoder.encode(event).startswith('data: '))
+        self.assertEqual(
+            explicit_ndjson_encoder.get_content_type(),
+            'application/x-ndjson',
+        )
 
     def test_flatten_text_content_handles_multimodal_content(self) -> None:
         content = [
@@ -119,6 +124,24 @@ class AgUiProtocolTests(unittest.TestCase):
         payload = json.loads(encoded.removeprefix('data: ').strip())
 
         self.assertEqual(payload['content']['payload'], 'abc')
+
+    def test_event_encoder_uses_aliases_for_nested_models(self) -> None:
+        class NestedPayload(BaseModel):
+            raw_event: str = Field(alias='rawEvent')
+
+        event = ActivitySnapshotEvent(
+            message_id='activity-1',
+            activity_type='TOOL',
+            content={'payload': NestedPayload(rawEvent='tool-started')},
+        )
+
+        encoded = EventEncoder().encode(event)
+        payload = json.loads(encoded.removeprefix('data: ').strip())
+
+        self.assertEqual(
+            payload['content']['payload'],
+            {'rawEvent': 'tool-started'},
+        )
 
     def test_get_last_user_text_ignores_non_user_messages(self) -> None:
         messages = [

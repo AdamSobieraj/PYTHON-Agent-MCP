@@ -564,6 +564,44 @@ class A2AAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload['mcpTools'][0]['toolName'], 'search_docs')
         self.assertEqual(payload['warnings'], [])
 
+    async def test_ag_ui_info_endpoint_describes_content_negotiation(self) -> None:
+        with (
+            patch.object(AnalysisAgentExecutor, 'startup', new=AsyncMock()),
+            patch.object(AnalysisAgentExecutor, 'shutdown', new=AsyncMock()),
+        ):
+            agent_card = _build_agent_card(
+                public_host='testserver',
+                http_port=10000,
+                grpc_port=10001,
+                compat_grpc_port=10002,
+            )
+            agent_executor = AnalysisAgentExecutor()
+            request_handler = _build_request_handler(
+                agent_card,
+                agent_executor,
+            )
+            app = _build_app(agent_card, request_handler, agent_executor)
+
+            async with app.router.lifespan_context(app):
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url='http://testserver',
+                ) as client:
+                    response = await client.get('/ag-ui')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['content_type'], 'text/event-stream')
+        self.assertEqual(
+            payload['supported_content_types'],
+            ['text/event-stream', 'application/x-ndjson'],
+        )
+        self.assertEqual(
+            payload['content_negotiation']['request_header'],
+            'Accept',
+        )
+
     async def test_ag_ui_endpoint_respects_ndjson_accept_header(self) -> None:
         async def fake_stream_ag_ui(
             _self: AnalysisAgent,

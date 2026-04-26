@@ -94,7 +94,6 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
-memory = None
 
 DEFAULT_AGENT_SETTINGS = 'Analyst agent'
 SSL_VERIFY = os.getenv('SSL_VERIFY', 'False').lower() in ('true', '1', 't')

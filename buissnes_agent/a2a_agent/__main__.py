@@ -44,6 +44,7 @@ from a2a.utils.proto_utils import parse_params
 try:
     from .ag_ui import (
         AG_UI_MEDIA_TYPE,
+        AG_UI_NDJSON_MEDIA_TYPE,
         EventEncoder,
         RunAgentInput,
         get_last_user_text,
@@ -54,6 +55,7 @@ try:
 except ImportError:
     from buissnes_agent.a2a_agent.ag_ui import (  # type: ignore
         AG_UI_MEDIA_TYPE,
+        AG_UI_NDJSON_MEDIA_TYPE,
         EventEncoder,
         RunAgentInput,
         get_last_user_text,
@@ -511,6 +513,19 @@ def _build_app(
             'endpoint': '/ag-ui',
             'method': 'POST',
             'content_type': AG_UI_MEDIA_TYPE,
+            'supported_content_types': [
+                AG_UI_MEDIA_TYPE,
+                AG_UI_NDJSON_MEDIA_TYPE,
+            ],
+            'content_negotiation': {
+                'request_header': 'Accept',
+                'default': AG_UI_MEDIA_TYPE,
+                'selection': (
+                    'Returns application/x-ndjson when the Accept header '
+                    'requests JSON without text/event-stream; otherwise '
+                    'streams text/event-stream.'
+                ),
+            },
             'threading': 'stateless-per-run',
         }
 

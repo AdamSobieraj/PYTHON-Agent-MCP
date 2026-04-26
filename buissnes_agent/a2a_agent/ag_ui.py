@@ -221,16 +221,21 @@ def get_last_user_text(messages: list[Message]) -> str:
 class EventEncoder:
     def __init__(self, accept: str | None = None) -> None:
         accept_value = (accept or '').lower()
+        accepts_sse = AG_UI_MEDIA_TYPE in accept_value
+        accepts_json = (
+            'application/json' in accept_value
+            or AG_UI_NDJSON_MEDIA_TYPE in accept_value
+        )
         self._use_sse = (
             not accept_value
-            or AG_UI_MEDIA_TYPE in accept_value
-            or '*/*' in accept_value
+            or accepts_sse
+            or not accepts_json
         )
 
     @staticmethod
     def _json_default(value: Any) -> Any:
         if hasattr(value, 'model_dump'):
-            return value.model_dump(exclude_none=True)
+            return value.model_dump(by_alias=True, exclude_none=True)
         if isinstance(value, bytes):
             return value.decode('utf-8', errors='replace')
         if isinstance(value, bytearray):
