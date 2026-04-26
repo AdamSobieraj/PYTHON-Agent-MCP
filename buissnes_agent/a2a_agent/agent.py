@@ -8,21 +8,48 @@ from collections import Counter
 from collections.abc import AsyncIterable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
+from uuid import uuid4
 
 import httpx
 from google.adk.tools.mcp_tool.mcp_tool import McpTool
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.config import get_stream_writer
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field, create_model
 
 try:
     from . import patch_pydantic  # noqa: F401
+    from .ag_ui import (
+        ActivitySnapshotEvent,
+        Message as AgUiMessage,
+        RunAgentInput,
+        RunErrorEvent,
+        RunFinishedEvent,
+        RunStartedEvent,
+        StepFinishedEvent,
+        StepStartedEvent,
+        TextMessageContentEvent,
+        TextMessageEndEvent,
+        TextMessageStartEvent,
+        ToolCallArgsEvent,
+        ToolCallEndEvent,
+        ToolCallResultEvent,
+        ToolCallStartEvent,
+        flatten_text_content,
+        parse_tool_call_arguments,
+    )
     from .mcp_config import (
         AgentRuntimeConfig,
         McpServerConfig,
@@ -32,6 +59,25 @@ try:
     )
 except ImportError:
     from buissnes_agent.a2a_agent import patch_pydantic  # type: ignore  # noqa: F401
+    from buissnes_agent.a2a_agent.ag_ui import (  # type: ignore
+        ActivitySnapshotEvent,
+        Message as AgUiMessage,
+        RunAgentInput,
+        RunErrorEvent,
+        RunFinishedEvent,
+        RunStartedEvent,
+        StepFinishedEvent,
+        StepStartedEvent,
+        TextMessageContentEvent,
+        TextMessageEndEvent,
+        TextMessageStartEvent,
+        ToolCallArgsEvent,
+        ToolCallEndEvent,
+        ToolCallResultEvent,
+        ToolCallStartEvent,
+        flatten_text_content,
+        parse_tool_call_arguments,
+    )
     from buissnes_agent.a2a_agent.mcp_config import (  # type: ignore
         AgentRuntimeConfig,
         McpServerConfig,
@@ -42,7 +88,7 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
-memory = MemorySaver()
+memory = None
 
 DEFAULT_AGENT_SETTINGS = 'Analyst agent'
 SSL_VERIFY = os.getenv('SSL_VERIFY', 'False').lower() in ('true', '1', 't')
@@ -74,6 +120,11 @@ class ResponseFormat(BaseModel):
 
     status: Literal['input_required', 'completed', 'error'] = 'input_required'
     message: str
+
+
+memory = MemorySaver(
+    serde=JsonPlusSerializer().with_msgpack_allowlist([ResponseFormat])
+)
 
 
 @dataclass(slots=True)
@@ -139,6 +190,24 @@ def _extract_message_text(message: BaseMessage) -> str:
                     text_parts.append(text)
         return ' '.join(part.strip() for part in text_parts if part).strip()
     return str(content).strip()
+
+
+def _extract_stream_text_delta(message: BaseMessage) -> str:
+    content = getattr(message, 'content', '')
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                text_parts.append(block)
+                continue
+            if isinstance(block, dict) and block.get('type') == 'text':
+                text = block.get('text')
+                if isinstance(text, str):
+                    text_parts.append(text)
+        return ''.join(text_parts)
+    return str(content)
 
 
 def _message_key(message: BaseMessage) -> str:
@@ -441,6 +510,18 @@ class AnalysisAgent:
             if normalized_status_message:
                 item['status_message'] = normalized_status_message
         return item
+
+    def _json_safe(self, value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            return {
+                str(key): self._json_safe(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [self._json_safe(item) for item in value]
+        return str(value)
 
     def _load_runtime_config(self) -> AgentRuntimeConfig:
         self._initialize_langfuse()
@@ -1221,6 +1302,430 @@ class AnalysisAgent:
             config['run_name'] = langfuse_request.trace_name
 
         return config
+
+    def _get_last_ag_ui_user_text(
+        self,
+        messages: list[AgUiMessage],
+    ) -> str:
+        for message in reversed(messages):
+            if message.role.strip().lower() != 'user':
+                continue
+            text = flatten_text_content(message.content)
+            if text:
+                return text
+        return ''
+
+    def _langchain_messages_from_ag_ui(
+        self,
+        messages: list[AgUiMessage],
+    ) -> list[BaseMessage]:
+        converted_messages: list[BaseMessage] = []
+
+        for message in messages:
+            role = message.role.strip().lower()
+            text = flatten_text_content(message.content)
+
+            if role in {'system', 'developer'}:
+                if text:
+                    converted_messages.append(
+                        SystemMessage(
+                            content=text,
+                            id=message.id,
+                            name=message.name,
+                        )
+                    )
+                continue
+
+            if role == 'assistant':
+                tool_calls = [
+                    {
+                        'name': tool_call.function.name,
+                        'args': parse_tool_call_arguments(
+                            tool_call.function.arguments
+                        ),
+                        'id': tool_call.id,
+                    }
+                    for tool_call in message.tool_calls
+                ]
+                if text or tool_calls:
+                    converted_messages.append(
+                        AIMessage(
+                            content=text,
+                            id=message.id,
+                            name=message.name,
+                            tool_calls=tool_calls,
+                        )
+                    )
+                continue
+
+            if role == 'tool':
+                if text or message.error:
+                    converted_messages.append(
+                        ToolMessage(
+                            content=text or message.error or '',
+                            tool_call_id=(
+                                message.tool_call_id
+                                or message.id
+                                or str(uuid4())
+                            ),
+                            id=message.id,
+                            status=(
+                                'error' if message.error else 'success'
+                            ),
+                        )
+                    )
+                continue
+
+            if role == 'user' and text:
+                converted_messages.append(
+                    HumanMessage(
+                        content=text,
+                        id=message.id,
+                        name=message.name,
+                    )
+                )
+
+        return converted_messages
+
+    def _build_ag_ui_langfuse_request(
+        self,
+        run_input: RunAgentInput,
+        *,
+        input_text: str,
+    ) -> LangfuseRequest:
+        trace_metadata = {
+            'ag_ui_thread_id': run_input.thread_id,
+            'ag_ui_run_id': run_input.run_id,
+        }
+        if run_input.parent_run_id:
+            trace_metadata['ag_ui_parent_run_id'] = run_input.parent_run_id
+
+        observation_metadata = {
+            **trace_metadata,
+            'ag_ui_state': run_input.state,
+            'ag_ui_context': run_input.context,
+            'ag_ui_forwarded_props': run_input.forwarded_props,
+            'ag_ui_tool_count': len(run_input.tools),
+        }
+
+        return LangfuseRequest(
+            input_text=input_text,
+            session_id=run_input.thread_id,
+            trace_name='Deep Research Agent AG-UI request',
+            trace_id=self.create_langfuse_trace_id(run_input.run_id),
+            tags=['ag-ui', 'langgraph'],
+            trace_metadata=trace_metadata,
+            observation_metadata=self._json_safe(observation_metadata),
+            langchain_metadata=self._json_safe(trace_metadata),
+        )
+
+    def _status_item_to_ag_ui_event(
+        self,
+        item: AgentStreamItem,
+        *,
+        message_id: str,
+    ) -> ActivitySnapshotEvent:
+        return ActivitySnapshotEvent(
+            message_id=message_id,
+            activity_type='AGENT_STATUS',
+            content={
+                'taskState': item.get('task_state'),
+                'message': item.get('status_message') or item.get('content'),
+                'content': item.get('content'),
+                'metadata': item.get('metadata') or {},
+            },
+            replace=False,
+        )
+
+    def _status_item_to_ag_ui_text_events(
+        self,
+        item: AgentStreamItem,
+    ) -> list[Any]:
+        content = str(
+            item.get('status_message') or item.get('content') or ''
+        ).strip()
+        if not content:
+            return []
+
+        message_id = str(uuid4())
+        return [
+            TextMessageStartEvent(message_id=message_id),
+            TextMessageContentEvent(message_id=message_id, delta=content),
+            TextMessageEndEvent(message_id=message_id),
+        ]
+
+    def _should_emit_ag_ui_message_chunk(
+        self,
+        metadata: dict[str, Any],
+    ) -> bool:
+        # LangGraph emits an extra structured-output pass from the
+        # `generate_structured_response` node. AG-UI should only show the
+        # user-facing assistant text from the main `agent` node.
+        return metadata.get('langgraph_node') == 'agent'
+
+    async def stream_ag_ui(
+        self,
+        run_input: RunAgentInput,
+    ) -> AsyncIterable[Any]:
+        self._active_streams += 1
+        root_span = None
+        assistant_message_id = str(uuid4())
+        emitted_text = ''
+        text_started = False
+        text_closed = False
+        step_closed = False
+        emitted_tool_call_ids: set[str] = set()
+        completed_tool_call_ids: set[str] = set()
+        seen_status_message_keys: set[str] = set()
+        context_id = f'ag-ui::{run_input.thread_id}::{run_input.run_id}'
+        input_text = self._get_last_ag_ui_user_text(run_input.messages)
+        activity_message_id = f'activity-{run_input.run_id}'
+        request_trace = self._build_ag_ui_langfuse_request(
+            run_input,
+            input_text=input_text,
+        )
+
+        try:
+            root_span, langfuse_handler = self._request_trace(request_trace)
+
+            yield RunStartedEvent(
+                thread_id=run_input.thread_id,
+                run_id=run_input.run_id,
+                parent_run_id=run_input.parent_run_id,
+            )
+            yield StepStartedEvent(step_name='agent_execution')
+
+            try:
+                for item in await self.initialize():
+                    yield self._status_item_to_ag_ui_event(
+                        item,
+                        message_id=activity_message_id,
+                    )
+                    for event in self._status_item_to_ag_ui_text_events(item):
+                        yield event
+
+                if root_span is not None:
+                    self._update_request_trace(
+                        root_span,
+                        metadata={'phase': 'initialized', 'protocol': 'ag-ui'},
+                    )
+
+                if self.graph is None:
+                    raise RuntimeError('Agent graph was not initialized.')
+
+                inputs = {
+                    'messages': self._langchain_messages_from_ag_ui(
+                        run_input.messages
+                    )
+                }
+                config = self._build_graph_config(
+                    context_id,
+                    langfuse_request=request_trace,
+                    langfuse_handler=langfuse_handler,
+                )
+
+                async for chunk in self.graph.astream(
+                    inputs,
+                    config,
+                    stream_mode=['messages', 'updates', 'custom'],
+                    version='v2',
+                ):
+                    if chunk.get('type') == 'messages':
+                        payload = chunk.get('data')
+                        if (
+                            isinstance(payload, tuple)
+                            and len(payload) == 2
+                            and isinstance(payload[1], dict)
+                            and self._should_emit_ag_ui_message_chunk(
+                                payload[1]
+                            )
+                        ):
+                            message_chunk = payload[0]
+                            delta = _extract_stream_text_delta(message_chunk)
+                            if delta:
+                                if not text_started:
+                                    text_started = True
+                                    yield TextMessageStartEvent(
+                                        message_id=assistant_message_id
+                                    )
+                                emitted_text += delta
+                                yield TextMessageContentEvent(
+                                    message_id=assistant_message_id,
+                                    delta=delta,
+                                )
+
+                    if chunk.get('type') == 'updates':
+                        payload = chunk.get('data')
+                        if isinstance(payload, dict):
+                            for node_update in payload.values():
+                                if not isinstance(node_update, dict):
+                                    continue
+                                messages = node_update.get('messages')
+                                if not isinstance(messages, list) or not messages:
+                                    continue
+
+                                message = messages[-1]
+                                if isinstance(message, AIMessage):
+                                    for tool_call in message.tool_calls:
+                                        tool_call_id = str(
+                                            tool_call.get('id')
+                                            or f'tool-call-{len(emitted_tool_call_ids) + 1}'
+                                        )
+                                        if tool_call_id in emitted_tool_call_ids:
+                                            continue
+                                        emitted_tool_call_ids.add(tool_call_id)
+                                        yield ToolCallStartEvent(
+                                            tool_call_id=tool_call_id,
+                                            tool_call_name=str(
+                                                tool_call.get('name') or 'tool'
+                                            ),
+                                            parent_message_id=(
+                                                assistant_message_id
+                                                if text_started
+                                                else None
+                                            ),
+                                        )
+                                        yield ToolCallArgsEvent(
+                                            tool_call_id=tool_call_id,
+                                            delta=json.dumps(
+                                                tool_call.get('args') or {},
+                                                ensure_ascii=False,
+                                                separators=(',', ':'),
+                                            ),
+                                        )
+                                elif isinstance(message, ToolMessage):
+                                    tool_call_id = (
+                                        message.tool_call_id
+                                        or f'tool-call-{len(completed_tool_call_ids) + 1}'
+                                    )
+                                    if tool_call_id in completed_tool_call_ids:
+                                        continue
+                                    completed_tool_call_ids.add(tool_call_id)
+                                    yield ToolCallEndEvent(
+                                        tool_call_id=tool_call_id
+                                    )
+                                    yield ToolCallResultEvent(
+                                        message_id=(
+                                            getattr(message, 'id', None)
+                                            or str(uuid4())
+                                        ),
+                                        tool_call_id=tool_call_id,
+                                        content=(
+                                            _extract_message_text(message)
+                                            or str(message.content)
+                                        ),
+                                    )
+
+                    if chunk.get('type') in {'custom', 'updates'}:
+                        for item in self._map_graph_chunk(
+                            chunk,
+                            seen_message_keys=seen_status_message_keys,
+                        ):
+                            yield self._status_item_to_ag_ui_event(
+                                item,
+                                message_id=activity_message_id,
+                            )
+                            for event in self._status_item_to_ag_ui_text_events(
+                                item
+                            ):
+                                yield event
+
+                final_item = await self.get_agent_response(config)
+                final_output = str(
+                    final_item.get('content')
+                    or final_item.get('status_message')
+                    or ''
+                ).strip()
+
+                if final_output:
+                    if not text_started:
+                        text_started = True
+                        yield TextMessageStartEvent(
+                            message_id=assistant_message_id
+                        )
+
+                    if final_output != emitted_text:
+                        if final_output.startswith(emitted_text):
+                            remainder = final_output[len(emitted_text) :]
+                        elif not emitted_text:
+                            remainder = final_output
+                        else:
+                            remainder = ''
+
+                        if remainder:
+                            emitted_text += remainder
+                            yield TextMessageContentEvent(
+                                message_id=assistant_message_id,
+                                delta=remainder,
+                            )
+
+                if text_started and not text_closed:
+                    text_closed = True
+                    yield TextMessageEndEvent(message_id=assistant_message_id)
+
+                if not step_closed:
+                    step_closed = True
+                    yield StepFinishedEvent(step_name='agent_execution')
+
+                if root_span is not None:
+                    self._update_request_trace(
+                        root_span,
+                        output=final_output,
+                        task_state=final_item.get('task_state'),
+                        metadata=final_item.get('metadata'),
+                    )
+
+                if final_item.get('task_state') == 'failed':
+                    yield RunErrorEvent(
+                        message=(
+                            str(
+                                final_item.get('status_message')
+                                or final_output
+                                or 'The agent failed while processing the run.'
+                            )
+                        ),
+                        code='agent_failed',
+                    )
+                else:
+                    yield RunFinishedEvent(
+                        thread_id=run_input.thread_id,
+                        run_id=run_input.run_id,
+                        result={
+                            'taskState': final_item.get('task_state'),
+                            'content': final_item.get('content'),
+                            'statusMessage': final_item.get(
+                                'status_message'
+                            ),
+                            'metadata': final_item.get('metadata') or {},
+                        },
+                    )
+            except Exception as exc:
+                if root_span is not None:
+                    self._update_request_trace(
+                        root_span,
+                        output=str(exc),
+                        task_state='failed',
+                        metadata={'phase': 'failed', 'protocol': 'ag-ui'},
+                        level='ERROR',
+                        status_message=str(exc),
+                    )
+
+                if text_started and not text_closed:
+                    text_closed = True
+                    yield TextMessageEndEvent(message_id=assistant_message_id)
+
+                if not step_closed:
+                    step_closed = True
+                    yield StepFinishedEvent(step_name='agent_execution')
+
+                yield RunErrorEvent(
+                    message=str(exc),
+                    code=type(exc).__name__,
+                )
+        finally:
+            self._end_request_trace(root_span)
+            self._active_streams -= 1
+            await self._maybe_close_stale_toolsets()
 
     async def stream(
         self,

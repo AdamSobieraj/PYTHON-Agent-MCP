@@ -5,12 +5,14 @@ import os
 import sys
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any
 
 import click
 import grpc
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 from google.protobuf.json_format import MessageToDict
 
@@ -40,10 +42,16 @@ from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
 from a2a.utils.proto_utils import parse_params
 
 try:
+    from .ag_ui import AG_UI_MEDIA_TYPE, RunAgentInput, encode_sse_event
     from .agent import AnalysisAgent
     from .agent_executor import AnalysisAgentExecutor
     from .mcp_config import AgentRuntimeConfig
 except ImportError:
+    from buissnes_agent.a2a_agent.ag_ui import (  # type: ignore
+        AG_UI_MEDIA_TYPE,
+        RunAgentInput,
+        encode_sse_event,
+    )
     from buissnes_agent.a2a_agent.agent import AnalysisAgent  # type: ignore
     from buissnes_agent.a2a_agent.agent_executor import AnalysisAgentExecutor  # type: ignore
     from buissnes_agent.a2a_agent.mcp_config import (  # type: ignore
@@ -399,11 +407,43 @@ def _build_app(
     async def root() -> dict[str, str]:
         return {
             'name': agent_card.name,
+            'postPath': '/',
+            'catalog': '/catalog',
             'agent_card': AGENT_CARD_WELL_KNOWN_PATH,
             'jsonrpc': '/a2a/jsonrpc',
             'rest': '/a2a/rest',
+            'ag_ui': '/ag-ui',
             'docs': '/docs',
         }
+
+    async def _stream_ag_ui_response(
+        input_data: RunAgentInput,
+    ) -> StreamingResponse:
+        if not input_data.messages:
+            raise HTTPException(
+                status_code=400,
+                detail='AG-UI requests require at least one message.',
+            )
+
+        if not agent_executor.agent._get_last_ag_ui_user_text(input_data.messages):
+            raise HTTPException(
+                status_code=400,
+                detail='AG-UI requests require a user text message.',
+            )
+
+        async def event_generator():
+            async for event in agent_executor.agent.stream_ag_ui(input_data):
+                yield encode_sse_event(event)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type=AG_UI_MEDIA_TYPE,
+            headers={
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',
+            },
+        )
 
     @app.get(
         AGENT_CARD_WELL_KNOWN_PATH,
@@ -413,6 +453,81 @@ def _build_app(
     )
     async def get_agent_card() -> JSONResponse:
         return JSONResponse(agent_card_to_dict(agent_card))
+
+    @app.get(
+        '/catalog',
+        tags=['AG-UI'],
+        summary='Get a lightweight runtime catalog',
+        description='Returns a simple catalog snapshot compatible with the local AG-UI playground.',
+    )
+    async def get_catalog() -> dict[str, Any]:
+        return {
+            'loadedAt': datetime.now(timezone.utc).isoformat(),
+            'configPath': os.path.join(
+                os.path.dirname(__file__),
+                'default_config.json',
+            ),
+            'a2aAgents': [
+                {
+                    'name': agent_card.name,
+                    'displayName': agent_card.name,
+                    'description': agent_card.description,
+                    'endpointUrl': '/a2a/jsonrpc',
+                    'protocolBinding': 'JSONRPC',
+                    'skills': [skill.name for skill in agent_card.skills],
+                }
+            ],
+            'mcpTools': [
+                {
+                    'serverName': 'agent-runtime',
+                    'toolName': tool.name,
+                    'description': tool.description or '',
+                }
+                for tool in agent_executor.agent.tools
+            ],
+            'warnings': [],
+        }
+
+    @app.get('/catalog/', include_in_schema=False)
+    async def get_catalog_alias() -> dict[str, Any]:
+        return await get_catalog()
+
+    @app.get(
+        '/ag-ui',
+        tags=['AG-UI'],
+        summary='Describe the AG-UI endpoint',
+        description='Returns transport details for the AG-UI-compatible UI streaming endpoint.',
+    )
+    async def ag_ui_info() -> dict[str, Any]:
+        return {
+            'name': agent_card.name,
+            'description': agent_card.description,
+            'endpoint': '/ag-ui',
+            'method': 'POST',
+            'content_type': AG_UI_MEDIA_TYPE,
+            'threading': 'stateless-per-run',
+        }
+
+    @app.get('/agui', include_in_schema=False)
+    async def ag_ui_info_alias() -> dict[str, Any]:
+        return await ag_ui_info()
+
+    @app.post(
+        '/ag-ui',
+        tags=['AG-UI'],
+        summary='Run the agent over AG-UI',
+        description='Accepts AG-UI RunAgentInput payloads and streams AG-UI events over Server-Sent Events.',
+    )
+    async def run_ag_ui(input_data: RunAgentInput) -> StreamingResponse:
+        return await _stream_ag_ui_response(input_data)
+
+    @app.post('/agui', include_in_schema=False)
+    async def run_ag_ui_alias(input_data: RunAgentInput) -> StreamingResponse:
+        return await _stream_ag_ui_response(input_data)
+
+    @app.post('/', include_in_schema=False)
+    async def run_ag_ui_root(input_data: RunAgentInput) -> StreamingResponse:
+        return await _stream_ag_ui_response(input_data)
 
     _add_documented_rest_get_routes(
         app=app,
