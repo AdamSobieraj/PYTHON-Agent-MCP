@@ -207,3 +207,24 @@ class DataLoaderS3Service:
         except Exception as e:
             logger.error(f"S3 Download Error (Bytes): {e}")
             raise e
+
+    def upload_bytes(
+        self,
+        bucket_name: str,
+        key: str,
+        data: bytes,
+        content_type: str | None = None,
+    ) -> None:
+        try:
+            put_kwargs: dict[str, object] = {
+                'Bucket': bucket_name,
+                'Key': key,
+                'Body': data,
+            }
+            if content_type:
+                put_kwargs['ContentType'] = content_type
+
+            self.s3_client.put_object(**put_kwargs)
+        except Exception as e:
+            logger.error("S3 Upload Error (%s): %s", key, e)
+            raise e
