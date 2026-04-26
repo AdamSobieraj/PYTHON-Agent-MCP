@@ -125,7 +125,7 @@ class PdfParser(BaseDocumentParser):
         try:
             pdf_doc, original_page_dims = self._load_and_precrop_pdf(file_source)
             total_pages = len(pdf_doc)
-
+            # --- WYRAŹNY LOG STARTOWY ---
             logger.info("=" * 60)
             logger.info("ROZPOCZETO PRZETWARZANIE: %s", source_name)
             logger.info("Liczba stron do przetworzenia: %s", total_pages)
@@ -137,7 +137,7 @@ class PdfParser(BaseDocumentParser):
 
                 logger.info("\n[STRONA %s/%s] Przygotowywanie obrazu...", page_no, total_pages)
                 start_time = time.time()
-
+                 # Konwersja strony PDF do Base64 JPEG
                 base64_image = self._pdf_page_to_base64(page)
                 payload_mb = len(base64_image) / (1024 * 1024)
 
@@ -206,7 +206,9 @@ class PdfParser(BaseDocumentParser):
             "dpi_scale": str(self.dpi_scale),
             "margins_enabled": str(self._margins_enabled),
         }
-
+    # ══════════════════════════════════════════════════════════════
+    # WARSTWA 1: Wczytywanie i PRE-CROP (PyMuPDF cropbox)
+    # ══════════════════════════════════════════════════════════════
     def _load_and_precrop_pdf(
         self, file_source: Union[str, io.BytesIO, bytes]
     ) -> Tuple["fitz.Document", Dict[int, Tuple[float, float]]]:
@@ -243,6 +245,9 @@ class PdfParser(BaseDocumentParser):
         img_data = pix.tobytes("jpeg")
         return base64.b64encode(img_data).decode("utf-8")
 
+    # ══════════════════════════════════════════════════════════════
+    # WYWOŁANIE LLM (Vision API)
+    # ══════════════════════════════════════════════════════════════
     def _call_vision_llm(self, base64_image: str) -> Optional[str]:
         try:
             response = self.client.chat.completions.create(
@@ -270,7 +275,8 @@ class PdfParser(BaseDocumentParser):
                 ],
                 temperature=self.temperature,
                 max_tokens=4000,
-                top_p=0.1,
+                # ZABEZPIECZENIA PRZED NIESKOŃCZONĄ PĘTLĄ HALUCYNACJI:
+                top_p=0.1,  # Zmniejsza losowość do minimum
                 stop=["<|im_end|>", "<|endoftext|>", "</s>", "```\n\nUser:"],
             )
             return response.choices[0].message.content

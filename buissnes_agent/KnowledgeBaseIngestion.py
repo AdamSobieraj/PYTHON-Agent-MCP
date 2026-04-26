@@ -13,6 +13,7 @@ def main():
     logger.info("=== ROZPOCZYNAM PROCES INGESTII DANYCH (ETL) ===")
 
     try:
+        # 1. Pobieramy instancję bazy (połączoną z Qdrant i OpenAI)
         import InitialConfig
 
         InitialConfig.get_knowledge_base()

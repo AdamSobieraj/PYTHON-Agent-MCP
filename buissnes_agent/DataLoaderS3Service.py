@@ -215,6 +215,15 @@ class DataLoaderS3Service:
         data: bytes,
         content_type: str | None = None,
     ) -> None:
+        """
+        Wgrywa bajty do S3.
+
+        Args:
+            bucket_name: Nazwa bucketa S3
+            key: Klucz (ścieżka) pliku w S3
+            data: Dane w formie bajtów
+            content_type: Typ MIME (domyślnie 'application/octet-stream')
+        """
         try:
             put_kwargs: dict[str, object] = {
                 'Bucket': bucket_name,
