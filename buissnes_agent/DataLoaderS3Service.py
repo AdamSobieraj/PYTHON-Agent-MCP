@@ -23,8 +23,8 @@ class S3TextObject:
 
 class DataLoaderS3Service:
     def __init__(self):
-        self.aws_key = os.getenv('S3_ACCESS_KEY_ID') or os.getenv('AWS_ACCESS_KEY_ID')
-        self.aws_secret = os.getenv('S3_SECRET_ACCESS_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY')
+        self.aws_key = os.getenv('S3_AKID')
+        self.aws_secret = os.getenv('S3_SK')
         self.aws_region = os.getenv('AWS_REGION') or os.getenv('S3_REGION') or "eu-north-1"
         self.s3_endpoint = os.getenv('S3_ENDPOINT')
         self.s3_verify = self._resolve_s3_verify()

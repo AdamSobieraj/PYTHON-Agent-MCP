@@ -14,8 +14,8 @@ load_dotenv()
 
 
 def get_s3_client():
-    aws_key = os.getenv('S3_AKID') or os.getenv('AWS_ACCESS_KEY_ID')
-    aws_secret = os.getenv('S3_SK') or os.getenv('AWS_SECRET_ACCESS_KEY')
+    aws_key = os.getenv('S3_AKID')
+    aws_secret = os.getenv('S3_SK')
     s3_endpoint = os.getenv('S3_ENDPOINT')
     aws_region = os.getenv('AWS_REGION') or "us-east-1"
 
