@@ -1,31 +1,61 @@
 {
   "temperature": 0,
+  "agent_card": {
+    "name": "Deep Research Agent",
+    "description": "Helps with deep research and system analysis.",
+    "version": "1.0.0",
+    "provider": {
+      "organization": "Business Agent"
+    },
+    "capabilities": {
+      "streaming": true,
+      "push_notifications": false
+    },
+    "default_input_modes": [
+      "text"
+    ],
+    "default_output_modes": [
+      "text",
+      "task-status"
+    ],
+    "skills": [
+      {
+        "id": "system_analysis",
+        "name": "System Analysis Tool",
+        "description": "Helps with system analysis and research tasks.",
+        "tags": [
+          "system-analysis",
+          "research"
+        ],
+        "examples": [
+          "What is system analysis?"
+        ],
+        "input_modes": [
+          "text"
+        ],
+        "output_modes": [
+          "text",
+          "task-status"
+        ]
+      }
+    ]
+  },
   "mcp_servers": [
     {
       "name": "knowledge_base",
       "transport": "streamable_http",
-      "url": "http://localhost:8011/mcp"
+      "url": "http://dockge.home.arpa:8012/mcp",
+      "blocked_tools": [
+        "confluence_search"
+      ]
     },
     {
       "name": "atlassian",
       "transport": "streamable_http",
-      "url": "http://localhost:9002/mcp/",
-      "blocked_tools OR allowed_tools": [
-        "confluence_update_page",
-        "confluence_delete_page",
-        "confluence_delete_attachment"
-      ]
-      
-    },
-    {
-      "name": "curated_docs",
-      "transport": "streamable_http",
-      "url": "http://localhost:9010/mcp",
+      "url": "http://dockge.home.arpa:9002/mcp",
       "allowed_tools": [
-        "search_docs",
-        "get_doc"
-      ],
-      "tool_name_prefix": "docs"
+        "confluence_search"
+      ]
     }
   ]
 }

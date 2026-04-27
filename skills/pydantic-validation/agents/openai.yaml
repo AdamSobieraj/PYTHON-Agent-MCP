@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pydantic Validation"
+  short_description: "Pydantic models, validators, aliases, settings"
+  default_prompt: "Use $pydantic-validation to implement or review Pydantic models, validators, aliases, settings, or structured output contracts for a Python application."

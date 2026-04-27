@@ -1,0 +1,4 @@
+interface:
+  display_name: "A2A Protocol"
+  short_description: "Official A2A spec and SDK guidance"
+  default_prompt: "Use $a2a-protocol to implement or review an A2A agent, client, agent card, or protocol binding with the official spec and SDKs."

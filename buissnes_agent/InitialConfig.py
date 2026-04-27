@@ -43,8 +43,16 @@ def get_knowledge_base():
         logger.info("Dynamic Import: Ladowanie modulu S3...")
         from DataLoaderS3FileLoader import DataLoaderS3FileLoader
 
+        bucket_name = settings.get("s3.bucket")
+        if not bucket_name:
+            raise ValueError(
+                "Brak konfiguracji bucketu S3. "
+                "Ustaw s3.bucket w profilu, przekaż --bucket, "
+                "albo ustaw S3_BUCKET / S3_BUCKET_CONTAINER."
+            )
+
         data_loader = DataLoaderS3FileLoader(
-            bucket_name=settings.get("s3.bucket"),
+            bucket_name=bucket_name,
             prefix=settings.get("data_s3_source.input_path"),
         )
     else:

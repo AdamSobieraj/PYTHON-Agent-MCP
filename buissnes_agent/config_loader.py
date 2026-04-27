@@ -147,13 +147,28 @@ class Config:
                 target[keys[-1]] = env_val
                 logger.debug(f"Nadpisano z ENV: {keys} = {env_val}")
 
-        ### Bezpośrednie ładowanie S3_BUCKET z ENV (jeśli istnieje)
-        s3_bucket_env = os.getenv("S3_BUCKET")
+        bucket_env_candidates = [
+            ("S3_BUCKET", os.getenv("S3_BUCKET")),
+            ("S3_BUCKET_CONTAINER", os.getenv("S3_BUCKET_CONTAINER")),
+            ("S3_BUCKET_NAME", os.getenv("S3_BUCKET_NAME")),
+            ("AWS_S3_BUCKET", os.getenv("AWS_S3_BUCKET")),
+        ]
+        bucket_env_name = None
+        s3_bucket_env = None
+        for candidate_name, candidate_value in bucket_env_candidates:
+            if candidate_value:
+                bucket_env_name = candidate_name
+                s3_bucket_env = candidate_value
+                break
+
         if s3_bucket_env:
             if "s3" not in self._data:
                 self._data["s3"] = {}
             self._data["s3"]["bucket"] = s3_bucket_env
-            logger.info(f"Wykryto zmienną środowiskową S3_BUCKET. Ustawianie: s3.bucket = '{s3_bucket_env}'")
+            logger.info(
+                f"Wykryto zmienną środowiskową {bucket_env_name}. "
+                f"Ustawianie: s3.bucket = '{s3_bucket_env}'"
+            )
 
     def get(self, key_path: str, default: Any = None) -> Any:
         """

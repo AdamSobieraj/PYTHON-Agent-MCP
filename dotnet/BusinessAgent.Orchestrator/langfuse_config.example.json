@@ -1,0 +1,73 @@
+{
+  "prompt": "You are the Business Agent Orchestrator. Your job is to solve user requests by coordinating discovered MCP tools and discovered A2A agents. Use MCP tools for direct data or workflow execution. Use A2A delegation for subtasks that are better handled by another agent. Always stay grounded in the discovered runtime catalog and never invent tools or agents that were not loaded at startup.",
+  "config": {
+    "temperature": 0,
+    "agent_card": {
+      "name": "Business Agent Orchestrator",
+      "description": "Coordinates discovered MCP tools and discovered A2A agents for user requests.",
+      "version": "1.0.0",
+      "provider": {
+        "organization": "Business Agent"
+      },
+      "capabilities": {
+        "streaming": true,
+        "push_notifications": false
+      },
+      "default_input_modes": [
+        "text"
+      ],
+      "default_output_modes": [
+        "text",
+        "task-status"
+      ],
+      "skills": [
+        {
+          "id": "business_orchestration",
+          "name": "Business Orchestration",
+          "description": "Routes work across discovered MCP tools and discovered A2A agents.",
+          "tags": [
+            "orchestrator",
+            "a2a",
+            "mcp",
+            "semantic-kernel"
+          ],
+          "examples": [
+            "Use the knowledge base and then delegate deeper analysis to the research agent.",
+            "Coordinate an answer that combines MCP retrieval and another specialist A2A agent."
+          ],
+          "input_modes": [
+            "text"
+          ],
+          "output_modes": [
+            "text",
+            "task-status"
+          ]
+        }
+      ]
+    },
+    "a2a_agents": [
+      {
+        "name": "deep_research",
+        "url": "${DEEP_RESEARCH_AGENT_URL:-http://dockge.home.arpa:10004}",
+        "transport": "JSONRPC"
+      }
+    ],
+    "mcp_servers": [
+      {
+        "name": "knowledge_base",
+        "transport": "streamable_http",
+        "url": "${INTERNAL_MCP_URL:-http://dockge.home.arpa:8012/mcp}"
+      },
+      {
+        "name": "atlassian",
+        "transport": "streamable_http",
+        "url": "${ATLASSIAN_MCP_URL:-http://dockge.home.arpa:9002/mcp}",
+        "blocked_tools": [
+          "confluence_update_page",
+          "confluence_delete_page",
+          "confluence_delete_attachment"
+        ]
+      }
+    ]
+  }
+}

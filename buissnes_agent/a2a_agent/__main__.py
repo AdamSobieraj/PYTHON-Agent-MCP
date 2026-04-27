@@ -5,12 +5,14 @@ import os
 import sys
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any
 
 import click
 import grpc
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 from google.protobuf.json_format import MessageToDict
 
@@ -40,17 +42,51 @@ from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
 from a2a.utils.proto_utils import parse_params
 
 try:
+    from .ag_ui import (
+        AG_UI_MEDIA_TYPE,
+        AG_UI_NDJSON_MEDIA_TYPE,
+        EventEncoder,
+        RunAgentInput,
+        get_last_user_text,
+    )
     from .agent import AnalysisAgent
     from .agent_executor import AnalysisAgentExecutor
+    from .mcp_config import AgentRuntimeConfig
 except ImportError:
+    from buissnes_agent.a2a_agent.ag_ui import (  # type: ignore
+        AG_UI_MEDIA_TYPE,
+        AG_UI_NDJSON_MEDIA_TYPE,
+        EventEncoder,
+        RunAgentInput,
+        get_last_user_text,
+    )
     from buissnes_agent.a2a_agent.agent import AnalysisAgent  # type: ignore
     from buissnes_agent.a2a_agent.agent_executor import AnalysisAgentExecutor  # type: ignore
+    from buissnes_agent.a2a_agent.mcp_config import (  # type: ignore
+        AgentRuntimeConfig,
+    )
 
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_AGENT_CARD_NAME = 'Deep Research Agent'
+DEFAULT_AGENT_CARD_DESCRIPTION = (
+    'Helps with deep research and system analysis.'
+)
+DEFAULT_AGENT_CARD_VERSION = '1.0.0'
+DEFAULT_AGENT_CARD_PROVIDER_ORG = 'Business Agent'
+DEFAULT_AGENT_CARD_OUTPUT_MODES = ['text', 'task-status']
+DEFAULT_AGENT_CARD_SKILL = {
+    'id': 'system_analysis',
+    'name': 'System Analysis Tool',
+    'description': 'Helps with system analysis and research tasks.',
+    'tags': ['system-analysis', 'research'],
+    'examples': ['What is system analysis?'],
+}
 
 
 class MissingConfigurationError(Exception):
@@ -143,41 +179,147 @@ def _build_agent_card(
     http_port: int,
     grpc_port: int,
     compat_grpc_port: int,
+    runtime_config: AgentRuntimeConfig | None = None,
 ) -> AgentCard:
-    http_base_url = f'http://{public_host}:{http_port}'
-    input_modes = AnalysisAgent.SUPPORTED_CONTENT_TYPES
-    output_modes = ['text', 'task-status']
+    agent_card_config = None
+    if runtime_config is not None:
+        agent_card_config = runtime_config.config.agent_card
 
-    capabilities = AgentCapabilities(streaming=True, push_notifications=False)
-    skill = AgentSkill(
-        id='system_analysis',
-        name='System Analysis Tool',
-        description='Helps with system analysis and research tasks.',
-        tags=['system-analysis', 'research'],
-        examples=['What is system analysis?'],
-        input_modes=input_modes,
-        output_modes=output_modes,
+    http_base_url = f'http://{public_host}:{http_port}'
+    input_modes = list(
+        (
+            agent_card_config.default_input_modes
+            if agent_card_config
+            and agent_card_config.default_input_modes
+            else AnalysisAgent.SUPPORTED_CONTENT_TYPES
+        )
+    )
+    output_modes = list(
+        (
+            agent_card_config.default_output_modes
+            if agent_card_config
+            and agent_card_config.default_output_modes
+            else DEFAULT_AGENT_CARD_OUTPUT_MODES
+        )
     )
 
-    return AgentCard(
-        name='Deep Research Agent',
-        description='Helps with deep research and system analysis.',
-        provider=AgentProvider(
-            organization='Business Agent',
-            url=http_base_url,
+    capabilities_kwargs = {
+        'streaming': True,
+        'push_notifications': False,
+    }
+    if agent_card_config and agent_card_config.capabilities:
+        if agent_card_config.capabilities.streaming is not None:
+            capabilities_kwargs['streaming'] = (
+                agent_card_config.capabilities.streaming
+            )
+        if agent_card_config.capabilities.push_notifications is not None:
+            capabilities_kwargs['push_notifications'] = (
+                agent_card_config.capabilities.push_notifications
+            )
+        if agent_card_config.capabilities.extended_agent_card is not None:
+            capabilities_kwargs['extended_agent_card'] = (
+                agent_card_config.capabilities.extended_agent_card
+            )
+    capabilities = AgentCapabilities(**capabilities_kwargs)
+
+    if agent_card_config and agent_card_config.skills:
+        skills = [
+            AgentSkill(
+                id=skill.id,
+                name=skill.name,
+                description=skill.description,
+                tags=list(skill.tags),
+                examples=list(skill.examples or []),
+                input_modes=list(skill.input_modes or input_modes),
+                output_modes=list(skill.output_modes or output_modes),
+            )
+            for skill in agent_card_config.skills
+        ]
+    else:
+        skills = [
+            AgentSkill(
+                id=DEFAULT_AGENT_CARD_SKILL['id'],
+                name=DEFAULT_AGENT_CARD_SKILL['name'],
+                description=DEFAULT_AGENT_CARD_SKILL['description'],
+                tags=list(DEFAULT_AGENT_CARD_SKILL['tags']),
+                examples=list(DEFAULT_AGENT_CARD_SKILL['examples']),
+                input_modes=input_modes,
+                output_modes=output_modes,
+            )
+        ]
+
+    provider_config = agent_card_config.provider if agent_card_config else None
+    provider = AgentProvider(
+        organization=(
+            provider_config.organization
+            if provider_config and provider_config.organization
+            else DEFAULT_AGENT_CARD_PROVIDER_ORG
         ),
-        version='1.0.0',
-        default_input_modes=input_modes,
-        default_output_modes=output_modes,
-        capabilities=capabilities,
-        skills=[skill],
-        supported_interfaces=_build_supported_interfaces(
+        url=(
+            provider_config.url
+            if provider_config and provider_config.url
+            else http_base_url
+        ),
+    )
+
+    agent_card_kwargs = {
+        'name': (
+            agent_card_config.name
+            if agent_card_config and agent_card_config.name
+            else DEFAULT_AGENT_CARD_NAME
+        ),
+        'description': (
+            agent_card_config.description
+            if agent_card_config and agent_card_config.description
+            else DEFAULT_AGENT_CARD_DESCRIPTION
+        ),
+        'provider': provider,
+        'version': (
+            agent_card_config.version
+            if agent_card_config and agent_card_config.version
+            else DEFAULT_AGENT_CARD_VERSION
+        ),
+        'default_input_modes': input_modes,
+        'default_output_modes': output_modes,
+        'capabilities': capabilities,
+        'skills': skills,
+        'supported_interfaces': _build_supported_interfaces(
             public_host=public_host,
             http_port=http_port,
             grpc_port=grpc_port,
             compat_grpc_port=compat_grpc_port,
         ),
+    }
+    if (
+        agent_card_config
+        and agent_card_config.documentation_url
+    ):
+        agent_card_kwargs['documentation_url'] = (
+            agent_card_config.documentation_url
+        )
+    if agent_card_config and agent_card_config.icon_url:
+        agent_card_kwargs['icon_url'] = agent_card_config.icon_url
+
+    return AgentCard(**agent_card_kwargs)
+
+
+def _apply_runtime_config_to_agent_card(
+    agent_card: AgentCard,
+    runtime_config: AgentRuntimeConfig,
+    *,
+    public_host: str,
+    http_port: int,
+    grpc_port: int,
+    compat_grpc_port: int,
+) -> None:
+    updated_agent_card = _build_agent_card(
+        public_host=public_host,
+        http_port=http_port,
+        grpc_port=grpc_port,
+        compat_grpc_port=compat_grpc_port,
+        runtime_config=runtime_config,
     )
+    agent_card.CopyFrom(updated_agent_card)
 
 
 def _build_request_handler(
@@ -260,9 +402,9 @@ def _build_app(
             await agent_executor.shutdown()
 
     app = FastAPI(
-        title='Deep Research Agent',
-        description='A2A server exposing JSON-RPC, HTTP+JSON REST, and gRPC transports.',
-        version='1.0.0',
+        title=agent_card.name,
+        description=agent_card.description,
+        version=agent_card.version,
         lifespan=lifespan,
     )
 
@@ -273,11 +415,46 @@ def _build_app(
     async def root() -> dict[str, str]:
         return {
             'name': agent_card.name,
+            'postPath': '/',
+            'catalog': '/catalog',
             'agent_card': AGENT_CARD_WELL_KNOWN_PATH,
             'jsonrpc': '/a2a/jsonrpc',
             'rest': '/a2a/rest',
+            'ag_ui': '/ag-ui',
             'docs': '/docs',
         }
+
+    async def _stream_ag_ui_response(
+        input_data: RunAgentInput,
+        request: Request,
+    ) -> StreamingResponse:
+        if not input_data.messages:
+            raise HTTPException(
+                status_code=400,
+                detail='AG-UI requests require at least one message.',
+            )
+
+        if not get_last_user_text(input_data.messages):
+            raise HTTPException(
+                status_code=400,
+                detail='AG-UI requests require a user text message.',
+            )
+
+        encoder = EventEncoder(accept=request.headers.get('accept'))
+
+        async def event_generator():
+            async for event in agent_executor.agent.stream_ag_ui(input_data):
+                yield encoder.encode(event)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type=encoder.get_content_type(),
+            headers={
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',
+            },
+        )
 
     @app.get(
         AGENT_CARD_WELL_KNOWN_PATH,
@@ -287,6 +464,100 @@ def _build_app(
     )
     async def get_agent_card() -> JSONResponse:
         return JSONResponse(agent_card_to_dict(agent_card))
+
+    @app.get(
+        '/catalog',
+        tags=['AG-UI'],
+        summary='Get a lightweight runtime catalog',
+        description='Returns a simple catalog snapshot compatible with the local AG-UI playground.',
+    )
+    async def get_catalog() -> dict[str, Any]:
+        return {
+            'loadedAt': datetime.now(timezone.utc).isoformat(),
+            'configPath': 'default_config.json',
+            'a2aAgents': [
+                {
+                    'name': agent_card.name,
+                    'displayName': agent_card.name,
+                    'description': agent_card.description,
+                    'endpointUrl': '/a2a/jsonrpc',
+                    'protocolBinding': 'JSONRPC',
+                    'skills': [skill.name for skill in agent_card.skills],
+                }
+            ],
+            'mcpTools': [
+                {
+                    'serverName': 'agent-runtime',
+                    'toolName': tool.name,
+                    'description': tool.description or '',
+                }
+                for tool in agent_executor.agent.tools
+            ],
+            'warnings': [],
+        }
+
+    @app.get('/catalog/', include_in_schema=False)
+    async def get_catalog_alias() -> dict[str, Any]:
+        return await get_catalog()
+
+    @app.get(
+        '/ag-ui',
+        tags=['AG-UI'],
+        summary='Describe the AG-UI endpoint',
+        description='Returns transport details for the AG-UI-compatible UI streaming endpoint.',
+    )
+    async def ag_ui_info() -> dict[str, Any]:
+        return {
+            'name': agent_card.name,
+            'description': agent_card.description,
+            'endpoint': '/ag-ui',
+            'method': 'POST',
+            'content_type': AG_UI_MEDIA_TYPE,
+            'supported_content_types': [
+                AG_UI_MEDIA_TYPE,
+                AG_UI_NDJSON_MEDIA_TYPE,
+            ],
+            'content_negotiation': {
+                'request_header': 'Accept',
+                'default': AG_UI_MEDIA_TYPE,
+                'selection': (
+                    'Returns application/x-ndjson when the Accept header '
+                    'requests JSON without text/event-stream; otherwise '
+                    'streams text/event-stream.'
+                ),
+            },
+            'threading': 'stateless-per-run',
+        }
+
+    @app.get('/agui', include_in_schema=False)
+    async def ag_ui_info_alias() -> dict[str, Any]:
+        return await ag_ui_info()
+
+    @app.post(
+        '/ag-ui',
+        tags=['AG-UI'],
+        summary='Run the agent over AG-UI',
+        description='Accepts AG-UI RunAgentInput payloads and streams AG-UI events with accept-aware encoding.',
+    )
+    async def run_ag_ui(
+        input_data: RunAgentInput,
+        request: Request,
+    ) -> StreamingResponse:
+        return await _stream_ag_ui_response(input_data, request)
+
+    @app.post('/agui', include_in_schema=False)
+    async def run_ag_ui_alias(
+        input_data: RunAgentInput,
+        request: Request,
+    ) -> StreamingResponse:
+        return await _stream_ag_ui_response(input_data, request)
+
+    @app.post('/', include_in_schema=False)
+    async def run_ag_ui_root(
+        input_data: RunAgentInput,
+        request: Request,
+    ) -> StreamingResponse:
+        return await _stream_ag_ui_response(input_data, request)
 
     _add_documented_rest_get_routes(
         app=app,
@@ -353,13 +624,25 @@ async def serve(
     _validate_ports(http_port, grpc_port, compat_grpc_port)
 
     public_host = _resolve_public_host(host)
+    agent_executor = AnalysisAgentExecutor()
+    runtime_config = agent_executor.agent.load_runtime_config_snapshot()
     agent_card = _build_agent_card(
         public_host=public_host,
         http_port=http_port,
         grpc_port=grpc_port,
         compat_grpc_port=compat_grpc_port,
+        runtime_config=runtime_config,
     )
-    agent_executor = AnalysisAgentExecutor()
+    agent_executor.agent.register_runtime_config_listener(
+        lambda updated_runtime_config: _apply_runtime_config_to_agent_card(
+            agent_card,
+            updated_runtime_config,
+            public_host=public_host,
+            http_port=http_port,
+            grpc_port=grpc_port,
+            compat_grpc_port=compat_grpc_port,
+        )
+    )
     request_handler = _build_request_handler(agent_card, agent_executor)
     app = _build_app(agent_card, request_handler, agent_executor)
 
@@ -385,7 +668,7 @@ async def serve(
             )
             await compat_grpc_server.start()
 
-        logger.info('Starting Deep Research Agent')
+        logger.info('Starting %s', agent_card.name)
         logger.info(' - Agent card: http://%s:%s%s', public_host, http_port, AGENT_CARD_WELL_KNOWN_PATH)
         logger.info(' - JSON-RPC:   http://%s:%s/a2a/jsonrpc', public_host, http_port)
         logger.info(' - REST:       http://%s:%s/a2a/rest', public_host, http_port)
