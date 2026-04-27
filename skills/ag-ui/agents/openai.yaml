@@ -1,0 +1,4 @@
+interface:
+  display_name: "AG-UI"
+  short_description: "AG-UI protocol and SDK guidance"
+  default_prompt: "Use $ag-ui to implement or debug an AG-UI agent, client, event stream, or HTTP endpoint."
