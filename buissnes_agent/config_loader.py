@@ -170,5 +170,10 @@ class Config:
         return val
 
 
-# Globalna instancja
-settings = Config()
+_settings = None
+
+def get_settings():
+    global _settings
+    if _settings is None:
+        _settings = Config()
+    return _settings

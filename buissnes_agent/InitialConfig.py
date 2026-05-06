@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 from QdrantDatabaseStore import QdrantDatabaseStore
 from buissnes_agent.EmbeddingClient import LocalEmbeddingClient
-from buissnes_agent.config_loader import settings
+from buissnes_agent.config_loader import get_settings
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
@@ -21,6 +21,8 @@ def get_knowledge_base():
     Singleton Pattern: Tworzy lub zwraca istniejącą instancję SearchKnowledgebase.
     Odpowiada za wstrzyknięcie zależności (Client, Store, Config).
     """
+    settings = get_settings()
+
     global KNOWLEDGE_BASE
     if KNOWLEDGE_BASE:
         return KNOWLEDGE_BASE

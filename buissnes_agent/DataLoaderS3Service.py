@@ -6,7 +6,7 @@ from typing import Generator
 import boto3
 from dotenv import load_dotenv
 
-from buissnes_agent.config_loader import settings
+from buissnes_agent.config_loader import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ class DataLoaderS3Service:
             self.s3_verify,
         )
         self.s3_client = self.session.client('s3', **client_kwargs)
+        self.settings = get_settings()
 
     @staticmethod
     def _resolve_s3_verify() -> bool | str:

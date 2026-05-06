@@ -6,7 +6,7 @@ from typing import Dict, Any, Generator, Tuple, Protocol, List
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
-from buissnes_agent.config_loader import settings
+from buissnes_agent.config_loader import get_settings
 # Chunkings
 from buissnes_agent.textchunker.langchain.LangChainChunker import LangChainChunker
 from buissnes_agent.textchunker.noLibChunker.NoLibChunker import NoLibChunker as LegacyChunker
@@ -153,6 +153,7 @@ class SearchKnowledgebase:
         """
         Transformuje strony na listę chunków ze zunifikowanymi metadanymi.
         """
+        settings = get_settings()
         chunk_module = settings.get("chunking.module")
         ext = os.path.splitext(object_key)[1].lower()
 
@@ -219,6 +220,8 @@ class SearchKnowledgebase:
         2. Jeśli brak, szuka w: chunking.strategies.{module_name}.def (fallback modułu)
         3. Pobiera parametry, uzupełniając braki globalnymi wartościami domyślnymi.
         """
+        settings = get_settings()
+
         clean_ext = ext.lstrip(".").lower()
         if not clean_ext:
             clean_ext = "def"

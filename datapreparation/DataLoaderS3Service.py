@@ -6,7 +6,7 @@ from typing import Generator
 import boto3
 from dotenv import load_dotenv
 
-from config_loader import settings
+from LoadConfig import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +43,13 @@ class DataLoaderS3Service:
             client_kwargs['endpoint_url'] = self.s3_endpoint
 
         logger.info(
+
             "S3Service: endpoint=%s verify=%s",
             self.s3_endpoint or "<aws-default>",
             self.s3_verify,
         )
         self.s3_client = self.session.client('s3', **client_kwargs)
+        self.settings = get_settings()
 
     @staticmethod
     def _resolve_s3_verify() -> bool | str:
@@ -100,7 +102,7 @@ class DataLoaderS3Service:
         prefix_arg = prefix if prefix else ""
 
         # Pobieramy dozwolone rozszerzenia z settings, lub ustawiamy domyślne jeśli brak
-        allowed_exts = settings.get("chunking.allowed_extensions", [])
+        allowed_exts = self.settings.get("chunking.allowed_extensions", [])
         if not allowed_exts:
             # Dodałem .xsd bo widziałem je w Twoich logach
             allowed_exts = ['.txt', '.md', '.pdf', '.docx', '.xlsx', '.xsd', '.xml', '.json']

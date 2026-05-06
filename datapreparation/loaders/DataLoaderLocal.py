@@ -3,7 +3,7 @@ import os
 from typing import Generator
 
 from interfaces.DataLoader import BaseDataLoader
-from config_loader import settings
+from config_loader import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,8 @@ class LocalDataLoader(BaseDataLoader):
 
     def list_files(self) -> Generator[str, None, None]:
         """Lists all files in directory with allowed extensions."""
+
+        settings = get_settings()
         allowed_exts = settings.get("chunking.allowed_extensions", [])
         ext_tuple = tuple(allowed_exts)
 

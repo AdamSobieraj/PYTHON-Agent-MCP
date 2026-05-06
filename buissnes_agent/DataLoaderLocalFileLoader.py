@@ -6,7 +6,7 @@ from typing import Generator, Tuple, Dict, Any, List
 from langchain_core.documents import Document
 
 from buissnes_agent.MetadataModels import FileMetadata
-from buissnes_agent.config_loader import settings
+from buissnes_agent.config_loader import get_settings
 # Importy parserów z naszego nowego modułu
 from buissnes_agent.parsers import (
     BaseDocumentParser,
@@ -42,6 +42,7 @@ class DataLoaderLocalFileLoader:
         }
         # Domyślny parser (obsłuży txt, json, xml, md itp.)
         self.default_parser = TextParser()
+        self.settings = get_settings()
 
     def _get_markdown_path(self, original_file_path: str) -> str:
         """
