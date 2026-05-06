@@ -992,7 +992,7 @@ class AnalysisAgent:
                 content = 'Reviewing tool results...'
                 if message.status == 'error':
                     phase = 'tool_result_error'
-                    content = 'A tool returned an error. Re-evaluating the plan...'
+                    content = 'A tool returned an error. Re-evaluating the plan.txt...'
                 updates.append(
                     self._stream_item(
                         content,
