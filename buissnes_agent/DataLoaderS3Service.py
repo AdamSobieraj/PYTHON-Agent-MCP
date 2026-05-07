@@ -48,7 +48,6 @@ class DataLoaderS3Service:
             self.s3_verify,
         )
         self.s3_client = self.session.client('s3', **client_kwargs)
-        self.settings = get_settings()
 
     @staticmethod
     def _resolve_s3_verify() -> bool | str:
@@ -101,6 +100,7 @@ class DataLoaderS3Service:
         prefix_arg = prefix if prefix else ""
 
         # Pobieramy dozwolone rozszerzenia z settings, lub ustawiamy domyślne jeśli brak
+        settings = get_settings()
         allowed_exts = settings.get("chunking.allowed_extensions", [])
         if not allowed_exts:
             # Dodałem .xsd bo widziałem je w Twoich logach

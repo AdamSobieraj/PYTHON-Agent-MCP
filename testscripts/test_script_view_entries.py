@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 
 # Upewnij się, że ten import pasuje do struktury Twojego projektu
 from buissnes_agent.QdrantDatabaseStore import QdrantDatabaseStore
-from buissnes_agent.config_loader import settings
 
 # Konfiguracja logowania
 logging.basicConfig(level=logging.INFO, format='%(message)s')

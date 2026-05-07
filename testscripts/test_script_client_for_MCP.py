@@ -70,9 +70,9 @@ DOSTĘPNE NARZĘDZIA I ICH PRZEZNACZENIE:
 
 1. 'query_knowledge_base' (BAZA WIEDZY QDRANT)
    - Parametry: query (pytanie), collection_name (nazwa kolekcji), top_k (liczba wyników, opcjonalne)
-   - Dostępne kolekcje: 'iso20022_specs', 'confluence_docs', 'wikipedia_general'
+   - Dostępne kolekcje: 'my_custom_collection_v2', 'confluence_docs', 'wikipedia_general'
    - Użyj do: Wyszukiwania w konkretnej bazie wiedzy
-   - Przykład: query="pola w pacs.008", collection_name="iso20022_specs"
+   - Przykład: query="pola w pacs.008", collection_name="my_custom_collection_v2"
 
 2. 'get_s3_markdown_document' (PEŁNY DOKUMENT)
    - Parametry: s3_uri (ścieżka do pliku)
@@ -86,7 +86,7 @@ DOSTĘPNE NARZĘDZIA I ICH PRZEZNACZENIE:
 INSTRUKCJA POSTĘPOWANIA:
 
 KROK 1: ANALIZA INTENCJI
-- Pytanie o specyfikację ISO/XML/tagi? -> collection_name="iso20022_specs"
+- Pytanie o specyfikację ISO/XML/tagi? -> collection_name="my_custom_collection_v2"
 - Pytanie o procedury wewnętrzne/projekt? -> collection_name="confluence_docs"
 - Pytanie ogólne/definicje/historia? -> collection_name="wikipedia_general"
 - Pytanie spoza zakresu bankowego? -> ODMÓW
