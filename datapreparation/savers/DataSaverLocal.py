@@ -1,5 +1,7 @@
 import logging
 import os
+import json
+from typing import Dict, Any
 
 from interfaces.DataSaver import BaseDataSaver
 
@@ -46,6 +48,33 @@ class LocalDataSaver(BaseDataSaver):
 
         logger.info(f"Saved markdown to: {markdown_path}")
         return markdown_path
+
+    def save_metadata(
+            self,
+            source_path: str,
+            metadata: Dict[str, Any],
+    ) -> str:
+        """
+        Saves metadata as JSON to local file system.
+
+        Args:
+            source_path: Original file path (e.g., "/data/HR/file.pdf")
+            metadata: Metadata dictionary to save
+
+        Returns:
+            str: Path to saved metadata file
+        """
+        metadata_path = self._build_metadata_path(source_path)
+
+        # Create directory if needed
+        os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+
+        # Write JSON file
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"Saved metadata to: {metadata_path}")
+        return metadata_path
 
     def get_markdown_url(self, markdown_path: str) -> str:
         """Generates file:// URL for markdown file."""

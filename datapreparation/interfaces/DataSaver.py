@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+from typing import Dict, Any
+import json
 
 
 class BaseDataSaver(ABC):
@@ -22,6 +24,24 @@ class BaseDataSaver(ABC):
 
         Returns:
             str: Path/URL to saved markdown file
+        """
+        pass
+
+    @abstractmethod
+    def save_metadata(
+            self,
+            source_key: str,
+            metadata: Dict[str, Any],
+    ) -> str:
+        """
+        Saves metadata as JSON to appropriate location.
+
+        Args:
+            source_key: Original source file key/path
+            metadata: Metadata dictionary to save
+
+        Returns:
+            str: Path/URL to saved metadata file
         """
         pass
 

@@ -30,7 +30,7 @@ class DataLoaderS3Service:
         self.s3_verify = self._resolve_s3_verify()
 
         if not self.aws_key or not self.aws_secret:
-            raise RuntimeError("Brak poświadczeń AWS w pliku .env")
+            raise RuntimeError("Missing AWS credentials in .env file")
 
         self.session = boto3.Session(
             aws_access_key_id=self.aws_key,
@@ -94,34 +94,34 @@ class DataLoaderS3Service:
 
     def list_objects(self, bucket_name: str, prefix: str = "") -> Generator[str, None, None]:
         """
-        Zwraca klucze plików tylko z podanego prefixu (folderu).
+        Returns file keys only from the given prefix (folder).
         """
         paginator = self.s3_client.get_paginator('list_objects_v2')
 
-        # Jeśli prefix jest pusty, to pusty string.
+        # If prefix is empty, use empty string
         prefix_arg = prefix if prefix else ""
 
-        # Pobieramy dozwolone rozszerzenia z settings, lub ustawiamy domyślne jeśli brak
+        # Get allowed extensions from settings, or set defaults if missing
         allowed_exts = self.settings.get("chunking.allowed_extensions", [])
         if not allowed_exts:
-            # Dodałem .xsd bo widziałem je w Twoich logach
+            # Added .xsd because they were seen in logs
             allowed_exts = ['.txt', '.md', '.pdf', '.docx', '.xlsx', '.xsd', '.xml', '.json']
 
         ext_tuple = tuple(allowed_exts)
 
-        # Kluczowy moment: parametr Prefix filtruje pliki po stronie AWS
-        # Dzięki temu nie pobieramy listy całego bucketa.
+        # Key moment: the Prefix parameter filters files on the AWS side
+        # Thanks to this, we don't fetch the list of the entire bucket
         try:
             for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix_arg):
                 if 'Contents' in page:
                     for obj in page['Contents']:
                         key = obj['Key']
 
-                        # Ignorujemy sam folder (jeśli AWS zwraca go jako obiekt)
+                        # Ignore the folder itself (if AWS returns it as an object)
                         if key.endswith('/'):
                             continue
 
-                        # Filtrowanie po rozszerzeniach
+                        # Filter by extensions
                         if key.lower().endswith(ext_tuple):
                             yield key
         except Exception as e:
@@ -136,6 +136,7 @@ class DataLoaderS3Service:
                 return data.decode("utf-8", errors="replace")
 
             return data.decode("windows-1252")
+
     @staticmethod
     def _normalize_etag(etag: str | None) -> str | None:
         if not etag:
@@ -143,9 +144,9 @@ class DataLoaderS3Service:
         return etag.strip('"')
 
     def download_text_response(
-        self,
-        bucket_name: str,
-        object_key: str,
+            self,
+            bucket_name: str,
+            object_key: str,
     ) -> S3TextObject:
         try:
             response = self.s3_client.get_object(Bucket=bucket_name, Key=object_key)
@@ -163,11 +164,11 @@ class DataLoaderS3Service:
         return self.download_text_response(bucket_name, object_key).text
 
     def download_text_range(
-        self,
-        bucket_name: str,
-        object_key: str,
-        start_byte: int,
-        end_byte: int | None = None,
+            self,
+            bucket_name: str,
+            object_key: str,
+            start_byte: int,
+            end_byte: int | None = None,
     ) -> S3TextObject:
         if start_byte < 0:
             raise ValueError("start_byte must be zero or greater.")
@@ -211,20 +212,20 @@ class DataLoaderS3Service:
             raise e
 
     def upload_bytes(
-        self,
-        bucket_name: str,
-        key: str,
-        data: bytes,
-        content_type: str | None = None,
+            self,
+            bucket_name: str,
+            key: str,
+            data: bytes,
+            content_type: str | None = None,
     ) -> None:
         """
-        Wgrywa bajty do S3.
+        Uploads bytes to S3.
 
         Args:
-            bucket_name: Nazwa bucketa S3
-            key: Klucz (ścieżka) pliku w S3
-            data: Dane w formie bajtów
-            content_type: Typ MIME (domyślnie 'application/octet-stream')
+            bucket_name: S3 bucket name
+            key: File key (path) in S3
+            data: Data in bytes format
+            content_type: MIME type (default 'application/octet-stream')
         """
         try:
             put_kwargs: dict[str, object] = {

@@ -5,7 +5,7 @@ import logging
 
 from dotenv import load_dotenv
 
-from buissnes_agent.config_loader import settings
+from LoadConfig import get_settings
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -33,7 +33,10 @@ def get_s3_client():
 
 
 def upload_recursive(s3_client, bucket_name):
-    local_path = settings.get("data_source.local_input_path")
+
+    settings = get_settings()
+
+    local_path = settings.get("dir")
     if not local_path or not os.path.exists(local_path):
         logger.error(f"Ścieżka LOCAL_DATA_PATH nie istnieje: {local_path}")
         sys.exit(1)
@@ -73,10 +76,10 @@ def upload_recursive(s3_client, bucket_name):
 
 
 if __name__ == "__main__":
-    bucket = settings.get("s3.bucket")
-    if not bucket:
-        print("Brak S3_BUCKET w .env")
-        sys.exit(1)
+
+    settings = get_settings()
+
+    bucket = settings.get("bucket")
 
     cli = get_s3_client()
 

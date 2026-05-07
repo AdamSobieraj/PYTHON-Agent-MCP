@@ -389,6 +389,10 @@ class MarkDownConverter:
                 markdown_url=markdown_url,
             )
 
+            # Save metadata
+            metadata_key = self.saver.save_metadata(file_key, metadata)
+            logger.info(f"Metadata saved to: {metadata_key}")
+
             # Enrich documents with metadata
             self.metadata_builder.enrich_documents(documents, metadata)
 
