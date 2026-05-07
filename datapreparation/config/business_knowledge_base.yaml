@@ -1,6 +1,0 @@
-data_source:
-  type: "s3"
-
-data_s3_source:
-  input_path: "business"
-
