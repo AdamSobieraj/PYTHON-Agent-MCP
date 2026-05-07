@@ -48,3 +48,14 @@ DataSourceLocal
 # httpd i potem kong
 
 # dynamicznie towrzone toole
+
+nowy porządek
+
+PYTHON-Agent-MCP
+- zawiera MCP, a2a, ag_ui_adapter
+
+PYTHON-Agent-DataConvert
+- zawiera różne formaty na md
+
+PYTHON-Agent-RAG-DataBuild
+- zawirera tworzenie embedingów, bazy danych, grafy
