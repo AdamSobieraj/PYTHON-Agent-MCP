@@ -30,7 +30,7 @@ class DataLoaderS3Service:
         self.s3_verify = self._resolve_s3_verify()
 
         if not self.aws_key or not self.aws_secret:
-            raise RuntimeError("Brak poświadczeń AWS w pliku .env")
+            raise RuntimeError("Missing AWS credentials in .env file")
 
         self.session = boto3.Session(
             aws_access_key_id=self.aws_key,
@@ -92,39 +92,39 @@ class DataLoaderS3Service:
 
     def list_objects(self, bucket_name: str, prefix: str = "") -> Generator[str, None, None]:
         """
-        Zwraca klucze plików tylko z podanego prefixu (folderu).
+        Returns file keys only from the given prefix (folder).
+        Only yields pre-converted .md files saved by Project 1.
+        Skips _metadata.json files - those are loaded separately per .md file.
         """
         paginator = self.s3_client.get_paginator('list_objects_v2')
 
-        # Jeśli prefix jest pusty, to pusty string.
+        # If prefix is empty, use empty string
         prefix_arg = prefix if prefix else ""
 
-        # Pobieramy dozwolone rozszerzenia z settings, lub ustawiamy domyślne jeśli brak
-        settings = get_settings()
-        allowed_exts = settings.get("chunking.allowed_extensions", [])
-        if not allowed_exts:
-            # Dodałem .xsd bo widziałem je w Twoich logach
-            allowed_exts = ['.txt', '.md', '.pdf', '.docx', '.xlsx', '.xsd', '.xml', '.json']
-
-        ext_tuple = tuple(allowed_exts)
-
-        # Kluczowy moment: parametr Prefix filtruje pliki po stronie AWS
-        # Dzięki temu nie pobieramy listy całego bucketa.
+        # Key moment: the Prefix parameter filters files on the AWS side
+        # Thanks to this, we don't fetch the list of the entire bucket
         try:
             for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix_arg):
-                if 'Contents' in page:
-                    for obj in page['Contents']:
-                        key = obj['Key']
+                if 'Contents' not in page:
+                    continue
 
-                        # Ignorujemy sam folder (jeśli AWS zwraca go jako obiekt)
-                        if key.endswith('/'):
-                            continue
+                for obj in page['Contents']:
+                    key = obj['Key']
 
-                        # Filtrowanie po rozszerzeniach
-                        if key.lower().endswith(ext_tuple):
-                            yield key
+                    # Ignore the folder itself (if AWS returns it as an object)
+                    if key.endswith('/'):
+                        continue
+
+                    # Skip metadata JSON files - loaded separately by the loader
+                    if key.lower().endswith('_metadata.json'):
+                        continue
+
+                    # Only yield pre-converted markdown files from Project 1
+                    if key.lower().endswith('.md'):
+                        yield key
+
         except Exception as e:
-            logger.error(f"S3Service Error listing objects: {e}")
+            logger.error("S3Service Error listing objects: %s", e)
             raise e
 
     def _decode_text(self, data: bytes, *, allow_replacement: bool = False) -> str:
@@ -135,6 +135,7 @@ class DataLoaderS3Service:
                 return data.decode("utf-8", errors="replace")
 
             return data.decode("windows-1252")
+
     @staticmethod
     def _normalize_etag(etag: str | None) -> str | None:
         if not etag:
@@ -155,7 +156,7 @@ class DataLoaderS3Service:
                 etag=self._normalize_etag(response.get("ETag")),
             )
         except Exception as e:
-            logger.error(f"S3Service Error downloading {object_key}: {e}")
+            logger.error("S3Service Error downloading %s: %s", object_key, e)
             raise e
 
     def download_text(self, bucket_name: str, object_key: str) -> str:
@@ -206,7 +207,7 @@ class DataLoaderS3Service:
             response = self.s3_client.get_object(Bucket=bucket_name, Key=key)
             return response['Body'].read()
         except Exception as e:
-            logger.error(f"S3 Download Error (Bytes): {e}")
+            logger.error("S3 Download Error (Bytes): %s", e)
             raise e
 
     def upload_bytes(
@@ -217,13 +218,13 @@ class DataLoaderS3Service:
         content_type: str | None = None,
     ) -> None:
         """
-        Wgrywa bajty do S3.
+        Uploads bytes to S3.
 
         Args:
-            bucket_name: Nazwa bucketa S3
-            key: Klucz (ścieżka) pliku w S3
-            data: Dane w formie bajtów
-            content_type: Typ MIME (domyślnie 'application/octet-stream')
+            bucket_name: S3 bucket name
+            key: File key (path) in S3
+            data: Data in bytes format
+            content_type: MIME type (default 'application/octet-stream')
         """
         try:
             put_kwargs: dict[str, object] = {

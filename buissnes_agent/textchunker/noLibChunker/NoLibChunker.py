@@ -3,7 +3,6 @@ import logging
 import sys
 from typing import List, Dict, Any
 
-# Importy z pakietu
 from .base import BaseNoLibStrategy
 from .strategies import (
     FixedStrategy,
@@ -17,57 +16,64 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='%(asctime)s -
 logger = logging.getLogger(__name__)
 
 # =========================================================
-# KLASA: CHUNKER (LEGACY / BASE / NOLIB)
+# CLASS: CHUNKER (LEGACY / BASE / NOLIB)
 # =========================================================
 #
-# ### Architektura: Orchestrator (Context)
+# ### Architecture: Orchestrator (Context)
 #
-# **Odpowiedzialność:**
-# 1.  **Factory / Router:** Wybiera odpowiednią strategię podziału (`_get_strategy`) na podstawie konfiguracji.
-# 2.  **Execution Engine:** Dzieli surowy tekst na mniejsze fragmenty (chunki).
-# 3.  **Safety Net:** Wymusza sztywne limity znaków (`_enforce_limit`), jeśli strategia logiczna zawiedzie.
-# 4.  **Interface Adapter:** Transformuje surowe stringi do ujednoliconego formatu `List[Dict]`,
-#     zgodnego z `LangChainChunker` (dodaje UUID i metadane).
+# **Responsibilities:**
+# 1. **Factory / Router:** Selects the appropriate splitting strategy (_get_strategy)
+#    based on configuration.
+# 2. **Execution Engine:** Splits raw text into smaller fragments (chunks).
+# 3. **Safety Net:** Enforces hard character limits (_enforce_limit) if the
+#    logical strategy fails.
+# 4. **Interface Adapter:** Transforms raw strings into the unified List[Dict] format,
+#    compatible with LangChainChunker (adds UUID and metadata).
 #
-# **Kluczowa różnica względem LangChainChunker:**
-# Ta klasa nie posiada zewnętrznych zależności (poza opcjonalnym Semantic).
-# Jest "lekka", szybka i działa na czystym Pythonie.
+# **Key difference from LangChainChunker:**
+# This class has no external dependencies (except optional Semantic).
+# It is "lightweight", fast and runs on pure Python.
 # =========================================================
 class NoLibChunker:
     def __init__(self, chunk_strategy: str, chunk_size: int = 600, chunk_overlap: int = 100):
         """
-        Inicjalizacja Chunkera z wyborem strategii i konfiguracją.
+        Initializes the Chunker with strategy selection and configuration.
 
         Args:
-            chunk_strategy (str): Nazwa strategii (np. 'auto', 'sentences', 'markdown').
-            chunk_size (int): Maksymalna długość fragmentu (w znakach).
-            chunk_overlap (int): Liczba znaków nakładania się fragmentów (kontekst).
+            chunk_strategy (str): Strategy name (e.g., 'auto', 'sentences', 'markdown').
+            chunk_size (int): Maximum fragment length (in characters).
+            chunk_overlap (int): Number of overlapping characters between fragments (context).
         """
         self.chunk_strategy = chunk_strategy
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
         logger.info(
-            f"NoLibChunker initialized. Strategy: {chunk_strategy}, Max Chunk Size: {chunk_size}, Overlap: {chunk_overlap}")
+            "NoLibChunker initialized. Strategy: %s, Max Chunk Size: %d, Overlap: %d",
+            chunk_strategy,
+            chunk_size,
+            chunk_overlap
+        )
 
     def _get_strategy(self, text: str) -> BaseNoLibStrategy:
         """
-        ### Heurystyka wybierająca strategię (Router / Factory Method)
+        ### Heuristic strategy selector (Router / Factory Method)
 
-        **Jak działa:**
-        Na podstawie `self.chunk_strategy` wybiera odpowiednią klasę implementującą `BaseNoLibStrategy`.
-        Dla opcji 'auto' analizuje tekst, aby podjąć decyzję dynamicznie.
+        **How it works:**
+        Based on `self.chunk_strategy`, selects the appropriate class implementing
+        `BaseNoLibStrategy`. For the 'auto' option, analyzes the text to make
+        the decision dynamically.
         """
-
-        # Logika "Auto" - Router
+        # "Auto" logic - Router
         if self.chunk_strategy == "auto":
-            # Analizuje tekst. Jeśli znajdzie strukturę Markdown (nagłówek `# `), używa strategii Markdown.
+            # Analyzes the text. If it finds Markdown structure (header `# `),
+            # uses the Markdown strategy.
             if "# " in text:
                 return MarkdownStrategy(self.chunk_size, self.chunk_overlap)
             else:
                 return SentencesStrategy(self.chunk_size, self.chunk_overlap)
 
-        # Mapowanie nazw na klasy strategii
+        # Map names to strategy classes
         if self.chunk_strategy == "fixed":
             return FixedStrategy(self.chunk_size, self.chunk_overlap)
         elif self.chunk_strategy in ["sentences", "by_sentences"]:
@@ -77,15 +83,18 @@ class NoLibChunker:
         elif self.chunk_strategy == "semanticChunker":
             return SemanticStrategy(self.chunk_size, self.chunk_overlap)
         else:
-            # Fallback - domyślnie zdania
-            logger.warning(f"Nieznana strategia '{self.chunk_strategy}', używam SentencesStrategy.")
+            # Fallback - default to sentences
+            logger.warning(
+                "Unknown strategy '%s', using SentencesStrategy.",
+                self.chunk_strategy
+            )
             return SentencesStrategy(self.chunk_size, self.chunk_overlap)
 
     def split_text(self, text: str) -> List[str]:
         """
-        Główna metoda logiczna (Low-level).
-        Deleguje zadanie podziału tekstu do wybranej strategii.
-        Zwraca surowe stringi (nie słowniki).
+        Main logical method (Low-level).
+        Delegates the text splitting task to the selected strategy.
+        Returns raw strings (not dictionaries).
         """
         if not text:
             return []
@@ -94,23 +103,29 @@ class NoLibChunker:
         return strategy.split_text(text)
 
     # =========================================================================
-    # METODA: process_content (Unified Interface)
+    # METHOD: process_content (Unified Interface)
     # =========================================================================
-    def process_content(self, content: str, base_metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    def process_content(
+            self,
+            content: str,
+            base_metadata: Dict[str, Any] = None
+    ) -> List[Dict[str, Any]]:
         """
-        ### Główny Pipeline Przetwarzania
+        ### Main Processing Pipeline
 
-        Ujednolica interfejs z `LangChainChunker`. Dzięki temu reszta aplikacji
-        nie musi wiedzieć, którego chunkera używa.
+        Unifies the interface with `LangChainChunker`. Thanks to this, the rest
+        of the application does not need to know which chunker it is using.
 
-        **Etapy procesu:**
-        1.  **Primary Split:** Wywołanie strategii logicznej (np. sentences/markdown).
-        2.  **Safety Net (`_enforce_limit`):** Sprawdzenie, czy chunki nie przekroczyły limitu znaków.
-        3.  **Metadata Injection & Formatting:** Opakowanie stringów w słowniki i nadanie UUID.
+        **Process stages:**
+        1. **Primary Split:** Calls the logical strategy (e.g., sentences/markdown).
+        2. **Safety Net (_enforce_limit):** Checks that chunks have not exceeded
+           the character limit.
+        3. **Metadata Injection & Formatting:** Wraps strings in dictionaries
+           and assigns UUIDs.
 
         Args:
-            content (str): Tekst do podziału.
-            base_metadata (Dict): Metadane pliku źródłowego (np. nazwa pliku).
+            content (str): Text to split.
+            base_metadata (Dict): Source file metadata (e.g., file name).
         """
         if not content:
             return []
@@ -118,43 +133,54 @@ class NoLibChunker:
         if base_metadata is None:
             base_metadata = {}
 
-        # 1. Pobieramy surowe stringi ze strategii (mogą być za długie!)
+        # 1. Fetch raw strings from the strategy (may be too long!)
         raw_chunks: List[str] = self.split_text(content)
 
-        # 2. Hard Limit Enforcer (Bezpiecznik)
-        # Gwarantuje, że żaden chunk nie przekroczy chunk_size.
+        # 2. Hard Limit Enforcer (Safety Net)
+        # Guarantees that no chunk exceeds chunk_size.
         safe_chunks: List[str] = self._enforce_limit(raw_chunks)
 
-        # 3. Formatowanie do ujednoliconego standardu (List[Dict])
+        # 3. Format to unified standard (List[Dict])
         results = []
         for idx, chunk_text in enumerate(safe_chunks):
-            # A. Przygotowanie ID
+
+            # A. Prepare ID
             source_uri = base_metadata.get("source", "unknown")
             unique_str = f"{source_uri}_{idx}_{chunk_text[:20]}"
             chunk_id = hashlib.md5(unique_str.encode("utf-8")).hexdigest()
 
-            # B. Separacja znanych pól od "extra"
-            # Wyciągamy znane pola ze słownika loadera, reszta idzie do extra_data
+            # B. Separate known fields from "extra"
+            # Extract known fields from the loader dict, rest goes to extra_data
             known_fields = {
-                "source": source_uri,
-                "title": base_metadata.get("title"),
-                "url": base_metadata.get("url"),
-                "extension": base_metadata.get("extension"),
-                "domain": base_metadata.get("domain"),
-                "tags": base_metadata.get("tags", []),
-                "page_number": base_metadata.get("page_number")
+                "source":               source_uri,
+                "title":                base_metadata.get("title"),
+                "url":                  base_metadata.get("url"),
+                "extension":            base_metadata.get("extension"),
+                "domain":               base_metadata.get("domain"),
+                "tags":                 base_metadata.get("tags", []),
+                "page_number":          base_metadata.get("page_number"),
+                # Line range of the entire source page in markdown
+                "document_line_start":  base_metadata.get("document_line_start"),
+                "document_line_end":    base_metadata.get("document_line_end"),
+                # Line range of this specific chunk in markdown  ← NEW
+                "md_start_line":        base_metadata.get("md_start_line"),
+                "md_end_line":          base_metadata.get("md_end_line"),
+                # Original PDF page number the chunk was taken from  ← NEW
+                "pdf_page":             base_metadata.get("pdf_page"),
             }
 
-            # Wszystko co nie jest znane, trafia do extra
-            extras = {k: v for k, v in base_metadata.items() if k not in known_fields}
+            # Everything not in known_fields goes to extras
+            extras = {
+                k: v for k, v in base_metadata.items()
+                if k not in known_fields
+            }
 
-            # C. Instancjalizacja Dataclass
+            # C. Instantiate Dataclass
             meta_obj = ChunkMetadata(
                 source=known_fields["source"],
-                phrase=chunk_text,  # Mandatory content
-                phrase_metadata_id=chunk_id,  # Mandatory ID
+                phrase=chunk_text,          # Mandatory content
+                phrase_metadata_id=chunk_id, # Mandatory ID
 
-                # Opcjonalne
                 title=known_fields["title"],
                 url=known_fields["url"],
                 extension=known_fields["extension"],
@@ -162,32 +188,45 @@ class NoLibChunker:
                 tags=known_fields["tags"],
                 page_number=known_fields["page_number"],
 
+                # Line range of the entire source page in markdown
+                document_line_start=known_fields["document_line_start"],
+                document_line_end=known_fields["document_line_end"],
+
+                # Line range of this specific chunk in markdown  ← NEW
+                md_start_line=known_fields["md_start_line"],
+                md_end_line=known_fields["md_end_line"],
+
+                # Original PDF page number  ← NEW
+                pdf_page=known_fields["pdf_page"],
+
                 extra_data=extras
             )
 
-            # D. Budowanie wyniku
+            # D. Build result
             results.append({
-                "text": chunk_text,  # Do embeddingu
-                "metadata": meta_obj.to_payload()  # Do bazy (płaski słownik)
+                "text": chunk_text,             # For embedding
+                "metadata": meta_obj.to_payload()  # For database (flat dict)
             })
 
         return results
 
     def _enforce_limit(self, chunks: List[str]) -> List[str]:
         """
-        ### Metoda pomocnicza: "Bezpiecznik rozmiaru" (Hard Limit Enforcer - NoLib Version)
+        ### Helper method: "Size Safety Net" (Hard Limit Enforcer - NoLib Version)
 
-        **Cel:** Gwarancja techniczna.
-        Strategie logiczne (np. Markdown) dbają o kontekst ("nie tnij w połowie sekcji"),
-        ale mogą zignorować limit znaków, jeśli sekcja jest ogromna.
+        **Goal:** Technical guarantee.
+        Logical strategies (e.g., Markdown) care about context ("don't cut in the
+        middle of a section"), but may ignore the character limit if the section
+        is huge.
 
-        **Działanie:**
-        Iteruje po wygenerowanych chunkach. Jeśli chunk > `chunk_size`, tnie go
-        na mniejsze kawałki "na sztywno" (Fixed Size Logic).
+        **How it works:**
+        Iterates over generated chunks. If chunk > `chunk_size`, splits it into
+        smaller pieces "hard" (Fixed Size Logic).
 
-        **Dlaczego implementacja ręczna?**
-        W przeciwieństwie do `LangChainChunker`, tutaj nie importujemy `RecursiveCharacterTextSplitter`,
-        aby zachować klasę lekką i niezależną od bibliotek zewnętrznych (Pure Python).
+        **Why manual implementation?**
+        Unlike `LangChainChunker`, we do not import `RecursiveCharacterTextSplitter`
+        here to keep the class lightweight and independent of external libraries
+        (Pure Python).
         """
         final_chunks = []
 
@@ -195,21 +234,21 @@ class NoLibChunker:
             if len(chunk) <= self.chunk_size:
                 final_chunks.append(chunk)
             else:
-                # Jeśli chunk jest za duży -> tniemy pętlą (logika FixedStrategy)
+                # If chunk is too large -> split in a loop (FixedStrategy logic)
                 start = 0
                 step = self.chunk_size - self.chunk_overlap
 
-                # Zabezpieczenie przed pętlą nieskończoną (gdyby overlap >= size)
+                # Guard against infinite loop (if overlap >= size)
                 if step <= 0:
                     step = self.chunk_size
 
                 while start < len(chunk):
                     end = start + self.chunk_size
-                    # Wycinamy pod-kawałek
+                    # Cut out the sub-chunk
                     sub_chunk = chunk[start:end]
                     final_chunks.append(sub_chunk)
 
-                    # Warunek stopu, jeśli dotarliśmy do końca
+                    # Stop condition if we reached the end
                     if end >= len(chunk):
                         break
 

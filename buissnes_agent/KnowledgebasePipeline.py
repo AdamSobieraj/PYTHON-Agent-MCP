@@ -1,5 +1,4 @@
 import logging
-import os
 import sys
 from typing import Dict, Any, Generator, Tuple, Protocol, List
 
@@ -16,65 +15,64 @@ logger = logging.getLogger(__name__)
 
 
 # ==============================================================================
-# DEFINICJA INTERFEJSU (KONTRAKTU) Wymagania dla Bazy Wektorowej
+# INTERFACE DEFINITION (CONTRACT) - Requirements for Vector Database
 # ==============================================================================
 class VectorStoreInterface(Protocol):
 
     def count(self) -> int:
-        """Zwraca liczbę wektorów w bazie."""
+        """Returns the number of vectors in the database."""
         ...
 
     def insert_batch(self, items: List[Dict[str, Any]]) -> None:
         """
-        Wstawia paczkę dokumentów.
-        items: Lista słowników zawierających klucze 'text', 'vector', 'metadata'.
+        Inserts a batch of documents.
+        items: List of dictionaries containing keys 'text', 'vector', 'metadata'.
         """
         ...
 
     def search(self, query_vector: List[float], limit: int = 3) -> List[Dict]:
         """
-        Wyszukuje podobne wektory.
-        Zwraca listę wyników (słowniki z 'text' i 'score').
+        Searches for similar vectors.
+        Returns a list of results (dictionaries with 'text' and 'score').
         """
         ...
 
 
 # ==============================================================================
-# INTERFEJS 2: ŹRÓDŁO DANYCH (Data Loader)
+# INTERFACE 2: DATA SOURCE (Data Loader)
 # ==============================================================================
 class DataLoaderInterface(Protocol):
     """
-    Abstrakcja źródła danych.
-    Ujednolica sposób pobierania plików z S3 (DataLoaderS3FileLoader)
-    oraz z dysku lokalnego (DataLoaderLocalFileLoader).
+    Data source abstraction.
+    Unifies the way files are fetched from S3 (DataLoaderS3FileLoader)
+    and from local disk (DataLoaderLocalFileLoader).
     """
 
     def list_objects(self) -> Generator[str, None, None]:
         """
-        Zwraca generator kluczy/ścieżek do plików.
+        Returns a generator of file keys/paths.
         """
         ...
 
-    # --- POPRAWKA: Typ zwracany to teraz Tuple[List[Document], Dict[str, Any]] ---
     def load_file_with_metadata(self, key: str) -> Tuple[List[Document], Dict[str, Any]]:
         """
-        Pobiera treść pliku i jego metadane na podstawie klucza.
-        Returns: (lista_stron_jako_documents, base_metadata_dict)
+        Fetches file content and its metadata based on the key.
+        Returns: (list_of_pages_as_documents, base_metadata_dict)
         """
         ...
 
 
 # ==============================================================================
-# KLASA ORKIESTRATORA
+# ORCHESTRATOR CLASS
 # ==============================================================================
 class SearchKnowledgebase:
     """
-    ### Klasa Orkiestrator (Coordinator Class)
+    ### Orchestrator Class (Coordinator Class)
 
-    Realizuje proces w 3 krokach:
-    1. **Setup Danych:** Wybór odpowiedniego Loadera (S3 lub Local).
-    2. **Setup Logiki:** Wybór odpowiedniego Chunkera (LangChain lub Legacy).
-    3. **Execution (Pipeline):** Jednolita pętla przetwarzania (Load -> Chunk -> Embed -> Store).
+    Executes the process in 3 steps:
+    1. **Data Setup:** Selecting the appropriate Loader (S3 or Local).
+    2. **Logic Setup:** Selecting the appropriate Chunker (LangChain or Legacy).
+    3. **Execution (Pipeline):** Unified processing loop (Load -> Chunk -> Embed -> Store).
     """
 
     def __init__(
@@ -93,15 +91,15 @@ class SearchKnowledgebase:
         self.data_loader = data_loader
 
         # ======================================================================
-        # ETAP Weryfikacja i Uruchomienie
+        # PHASE: Verification and Startup
         # ======================================================================
         count = self.store.count()
-        logger.info(f"Stan bazy wektorowej: {count} dokumentów.")
+        logger.info("Vector database state: %d documents.", count)
 
         if count > 0 and not force_refresh:
-            logger.info("SKIP: Baza niepusta. Ingestia pominięta.")
+            logger.info("SKIP: Database not empty. Ingestion skipped.")
         else:
-            logger.info("START: Uruchamianie jednolitego procesu ETL...")
+            logger.info("START: Launching unified ETL process...")
             self.perform_ingestion()
 
     def perform_ingestion(self):
@@ -111,27 +109,27 @@ class SearchKnowledgebase:
         object_generator = self.data_loader.list_objects()
 
         for object_key in object_generator:
-            logger.info(f"Processing: {object_key}")
+            logger.info("Processing: %s", object_key)
 
             try:
-                # Loader zwraca teraz listę stron (List[Document])
+                # Loader now returns a list of pages (List[Document])
                 documents_list, file_metadata = self.data_loader.load_file_with_metadata(object_key)
 
                 if not documents_list:
                     continue
 
-                # Dodaj numerację linii przed chunkowaniem
+                # Add line numbering before chunking
                 self._add_line_numbers_to_documents(documents_list)
 
-                # Wzbogacamy każdą stronę o ogólne metadane pliku (jeśli loader tego nie zrobił)
-                # Choć zaktualizowane loadery już to robią, ten krok jest świetnym zabezpieczeniem.
+                # Enrich each page with general file metadata (if loader hasn't done so).
+                # Although updated loaders already do this, this step is a great safeguard.
                 for doc in documents_list:
                     for key, value in file_metadata.items():
-                        # Jeśli klucza nie ma na stronie, ALBO jeśli strona ma pod tym kluczem None
+                        # If key is missing from the page, OR if the page has None under this key
                         if key not in doc.metadata or doc.metadata.get(key) is None:
                             doc.metadata[key] = value
 
-                # 3. CHUNKING (Transform) - Przekazujemy LISTĘ DOKUMENTÓW i metadane pliku
+                # 3. CHUNKING (Transform) - Pass LIST OF DOCUMENTS and file metadata
                 processed_chunks = self._transform_to_chunks(object_key, documents_list, file_metadata)
 
                 # 4. EMBEDDING & BATCHING
@@ -140,63 +138,85 @@ class SearchKnowledgebase:
                 files_processed += 1
 
             except Exception as e:
-                logger.error(f"Błąd przetwarzania pliku {object_key}: {e}")
+                logger.error("Error processing file %s: %s", object_key, e)
                 continue
 
         if batch_items:
             self.store.insert_batch(batch_items)
 
-        logger.info(f"PROCES ZAKOŃCZONY. Przetworzono plików: {files_processed}")
+        logger.info("PROCESS COMPLETE. Files processed: %d", files_processed)
 
-    # --- Zabezpieczenie dla starego Legacy Chunker ---
-    def _transform_to_chunks(self, object_key: str, documents_list: List[Document], base_metadata: dict) -> list[dict]:
+    def _transform_to_chunks(
+            self,
+            object_key: str,
+            documents_list: List[Document],
+            base_metadata: dict
+    ) -> list[dict]:
         """
-        Transformuje strony na listę chunków ze zunifikowanymi metadanymi.
+        Transforms pages into a list of chunks with unified metadata.
+
+        Note: All incoming files are pre-converted .md files from Project 1.
+        The original file extension is read from metadata (field 'extension')
+        so that the correct chunking strategy can be selected.
+        Falls back to 'def' if the original extension is unknown.
         """
         settings = get_settings()
         chunk_module = settings.get("chunking.module")
-        ext = os.path.splitext(object_key)[1].lower()
+
+        # All files arriving here are .md (pre-converted by Project 1).
+        # We read the ORIGINAL extension from metadata to select the correct
+        # chunking strategy (e.g., pdf -> recursive, xlsx -> def).
+        # Falls back to 'def' if original extension is not stored in metadata.
+        original_ext = base_metadata.get("extension", "")
+        ext = original_ext if original_ext and original_ext != ".md" else ".md"
 
         chunk_size, chunk_overlap, strategy = self._get_chunk_config(chunk_module, ext)
 
         if chunk_module in ["langchain"]:
-            logger.info(f"LOGIC LAYER: Wybrano LangChainChunker. Strategia: {strategy}")
+            logger.info(
+                "LOGIC LAYER: LangChainChunker selected. Strategy: %s",
+                strategy
+            )
             chunker_engine = LangChainChunker(strategy, chunk_size, chunk_overlap)
             processed_chunks = chunker_engine.process_content(documents_list)
 
-            # Dodaj numery linii do chunków
+            # Add line numbers to chunks
             self._add_line_numbers_to_chunks(processed_chunks, documents_list)
 
             return processed_chunks
 
         else:
-            logger.info("LOGIC LAYER: Wybrano Legacy Chunker.")
+            logger.info("LOGIC LAYER: Legacy Chunker selected.")
             chunker_engine = LegacyChunker(strategy, chunk_size, chunk_overlap)
 
-            # --- SUPER POPRAWKA: Przetwarzamy starym systemem strona po stronie! ---
+            # Process with legacy system page by page
             all_legacy_chunks = []
 
             for doc in documents_list:
-                # doc.metadata zawiera już poprawny page_number (1, 2, 3...)
-                # doc.page_content to tekst tylko z tej konkretnej strony
+                # doc.metadata already contains correct page_number (1, 2, 3...)
+                # doc.page_content is text only from this specific page
                 page_chunks = chunker_engine.process_content(doc.page_content, doc.metadata)
 
-                # Dodaj numery linii dla legacy chunków
+                # Add line numbers for legacy chunks
                 self._add_line_numbers_to_legacy_chunks(page_chunks, doc)
 
                 all_legacy_chunks.extend(page_chunks)
 
             return all_legacy_chunks
 
-    def _embed_and_queue_batch(self, processed_chunks: list[dict], batch_items: list[dict]) -> None:
+    def _embed_and_queue_batch(
+            self,
+            processed_chunks: list[dict],
+            batch_items: list[dict]
+    ) -> None:
         """
-        Generuje embeddingi dla chunków i dodaje je do kolejki (batch).
+        Generates embeddings for chunks and adds them to the queue (batch).
         """
         for item in processed_chunks:
             text_content = item["text"]
             metadata = item["metadata"]
 
-            # Generowanie wektora
+            # Generate vector
             vec = self.client.embed_query(text_content)
 
             batch_items.append({
@@ -205,20 +225,20 @@ class SearchKnowledgebase:
                 "metadata": metadata
             })
 
-            # Sprawdzenie wielkości paczki i wysyłka
+            # Check batch size and send
             if len(batch_items) >= self.batch_size:
                 self.store.insert_batch(batch_items)
                 batch_items.clear()
 
     def _get_chunk_config(self, module_name: str, ext: str) -> tuple[int, int, str]:
         """
-        Uniwersalna metoda pobierająca konfigurację chunkowania z obiektu settings.
-        Zastępuje hardkodowane match/case.
+        Universal method for fetching chunking configuration from the settings object.
+        Replaces hardcoded match/case.
 
-        Logika:
-        1. Szuka konfiguracji w: chunking.strategies.{module_name}.{ext_bez_kropki}
-        2. Jeśli brak, szuka w: chunking.strategies.{module_name}.def (fallback modułu)
-        3. Pobiera parametry, uzupełniając braki globalnymi wartościami domyślnymi.
+        Logic:
+        1. Looks for config at: chunking.strategies.{module_name}.{ext_without_dot}
+        2. If not found, looks at: chunking.strategies.{module_name}.def (module fallback)
+        3. Fetches parameters, filling gaps with global default values.
         """
         settings = get_settings()
 
@@ -230,11 +250,17 @@ class SearchKnowledgebase:
         ext_config = settings.get(f"{base_path}.{clean_ext}")
 
         if not ext_config:
-            logger.debug(f"Brak strategii dla {clean_ext} w module {module_name}. Używam fallbacku 'def'.")
+            logger.debug(
+                "No strategy for '%s' in module '%s'. Using 'def' fallback.",
+                clean_ext, module_name
+            )
             ext_config = settings.get(f"{base_path}.def")
 
         if not ext_config:
-            logger.warning(f"CRITICAL: Brak konfiguracji fallback 'def' dla modułu {module_name}!")
+            logger.warning(
+                "CRITICAL: No 'def' fallback config for module '%s'!",
+                module_name
+            )
             ext_config = {}
 
         global_default_size = settings.get("chunking.default_size")
@@ -243,14 +269,17 @@ class SearchKnowledgebase:
         chunk_size = ext_config.get("size", global_default_size)
         chunk_overlap = ext_config.get("overlap", global_default_overlap)
 
-        strategy = ext_config.get("strategy", "recursive" if module_name == "langchain" else "auto")
+        strategy = ext_config.get(
+            "strategy",
+            "recursive" if module_name == "langchain" else "auto"
+        )
 
         return int(chunk_size), int(chunk_overlap), str(strategy)
 
     def _add_line_numbers_to_documents(self, documents_list: List[Document]) -> None:
         """
-        Dodaje do metadanych każdej strony zakres linii w oryginalnym pliku Markdown.
-        document_line_start/end = zakres całej strony
+        Adds to each page's metadata the line range in the original Markdown file.
+        document_line_start/end = range of the entire page
         """
         current_line = 1
 
@@ -262,55 +291,67 @@ class SearchKnowledgebase:
 
             current_line += line_count
 
-        logger.info(f"Numeracja stron: {len(documents_list)} stron, łącznie {current_line - 1} linii")
+        logger.info(
+            "Page numbering: %d pages, %d lines total",
+            len(documents_list),
+            current_line - 1
+        )
 
-
-    def _calculate_chunk_line_numbers(self, chunk_text: str, original_text: str, page_line_start: int,
-                                      last_position: int = 0) -> Tuple[int, int, int]:
+    def _calculate_chunk_line_numbers(
+            self,
+            chunk_text: str,
+            original_text: str,
+            page_line_start: int,
+            last_position: int = 0
+    ) -> Tuple[int, int, int]:
         """
-        Oblicza numer linii początkowej i końcowej dla danego chunka.
+        Calculates the start and end line number for a given chunk.
 
         Args:
-            chunk_text: Tekst chunka
-            original_text: Oryginalny tekst strony
-            page_line_start: Numer linii, od której zaczyna się cała strona
-            last_position: Ostatnia pozycja w tekście (dla śledzenia kolejnych chunków)
+            chunk_text: Chunk text
+            original_text: Original page text
+            page_line_start: Line number where the entire page starts
+            last_position: Last position in the text (for tracking subsequent chunks)
 
         Returns:
             Tuple[chunk_line_start, chunk_line_end, new_position]
         """
-        # Znajdź pozycję chunka w oryginalnym tekście (od ostatniej pozycji)
+        # Find chunk position in the original text (from last position)
         chunk_position = original_text.find(chunk_text, last_position)
 
         if chunk_position == -1:
-            # Jeśli nie znaleziono (może być zmodyfikowany przez chunker), użyj last_position
+            # If not found (may have been modified by chunker), use last_position
             chunk_position = last_position
 
-        # Policz linie przed chunkiem (od początku strony)
+        # Count lines before the chunk (from the beginning of the page)
         text_before_chunk = original_text[:chunk_position]
         lines_before = text_before_chunk.count('\n')
 
-        # Policz linie w samym chunku
+        # Count lines in the chunk itself
         lines_in_chunk = chunk_text.count('\n')
 
-        # Oblicz zakres linii
+        # Calculate line range
         chunk_line_start = page_line_start + lines_before
         chunk_line_end = chunk_line_start + lines_in_chunk
 
-        # Jeśli chunk nie kończy się znakiem nowej linii, ale ma jakąś treść, to zajmuje tę linię
+        # If chunk does not end with newline but has content, it occupies that line
         if chunk_text and not chunk_text.endswith('\n'):
             chunk_line_end += 1
 
-        # Nowa pozycja do śledzenia następnego chunka
+        # New position for tracking the next chunk
         new_position = chunk_position + len(chunk_text)
 
         return chunk_line_start, chunk_line_end, new_position
 
-    def _add_line_numbers_to_chunks(self, chunks: List[Dict[str, Any]], documents_list: List[Document]) -> None:
+    def _add_line_numbers_to_chunks(
+            self,
+            chunks: List[Dict[str, Any]],
+            documents_list: List[Document]
+    ) -> None:
         """
-        Dodaje do każdego chunka:
-        1. document_line_start/end - zakres STRONY źródłowej (kopiowane)
-        2. embedding_line_start/end - zakres CHUNKA w oryginalnym pliku (obliczane)
+        Adds to each chunk:
+        1. document_line_start/end - range of the SOURCE PAGE (copied)
+        2. embedding_line_start/end - range of the CHUNK in the original file (calculated)
         """
         for chunk in chunks:
             chunk_text = chunk["text"]
@@ -319,10 +360,10 @@ class SearchKnowledgebase:
             chunk_page_number = chunk_metadata.get("page_number")
 
             if chunk_page_number is None:
-                logger.warning(" Chunk bez page_number - pomijam numerację linii")
+                logger.warning("Chunk without page_number - skipping line numbering")
                 continue
 
-            # Znajdź stronę źródłową
+            # Find the source page
             original_doc = None
             for doc in documents_list:
                 if doc.metadata.get("page_number") == chunk_page_number:
@@ -330,52 +371,59 @@ class SearchKnowledgebase:
                     break
 
             if original_doc is None:
-                logger.warning(f"Nie znaleziono strony {chunk_page_number}")
+                logger.warning("Page %s not found", chunk_page_number)
                 continue
 
-            # 1. KOPIUJ zakres STRONY do chunka (document_line_*)
+            # 1. COPY page range to chunk (document_line_*)
             page_line_start = original_doc.metadata.get("document_line_start", 1)
             page_line_end = original_doc.metadata.get("document_line_end", 1)
 
-            chunk_metadata["document_line_start"] = page_line_start  # ✅ Zakres całej strony
-            chunk_metadata["document_line_end"] = page_line_end  # ✅ Zakres całej strony
+            chunk_metadata["document_line_start"] = page_line_start  # Range of entire page
+            chunk_metadata["document_line_end"] = page_line_end      # Range of entire page
 
-            # 2. OBLICZ zakres CHUNKA (embedding_line_*)
+            # 2. CALCULATE chunk range (embedding_line_*)
             page_text = original_doc.page_content
             chunk_position = page_text.find(chunk_text)
 
             if chunk_position == -1:
-                # Fallback - jeśli nie znaleziono chunka, użyj zakresu całej strony
-                logger.debug(f"Chunk nie znaleziony w tekście strony {chunk_page_number}")
+                # Fallback - if chunk not found, use entire page range
+                logger.debug(
+                    "Chunk not found in page %s text",
+                    chunk_page_number
+                )
                 chunk_metadata["embedding_line_start"] = page_line_start
                 chunk_metadata["embedding_line_end"] = page_line_end
                 continue
 
-            # Policz linie przed chunkiem (w obrębie strony)
+            # Count lines before the chunk (within the page)
             text_before_chunk = page_text[:chunk_position]
             lines_before = text_before_chunk.count('\n')
 
-            # Policz linie w samym chunku
+            # Count lines in the chunk itself
             lines_in_chunk = chunk_text.count('\n')
 
-            # Oblicz GLOBALNY zakres chunka w pliku
+            # Calculate GLOBAL chunk range in the file
             chunk_line_start = page_line_start + lines_before
             chunk_line_end = chunk_line_start + lines_in_chunk
 
-            # Jeśli chunk ma treść i nie kończy się \n, zajmuje jeszcze jedną linię
+            # If chunk has content and does not end with \n, it occupies one more line
             if chunk_text and not chunk_text.endswith('\n'):
                 chunk_line_end += 1
 
-            chunk_metadata["embedding_line_start"] = chunk_line_start  # Zakres chunka
-            chunk_metadata["embedding_line_end"] = chunk_line_end  # akres chunka
+            chunk_metadata["embedding_line_start"] = chunk_line_start  # Chunk range
+            chunk_metadata["embedding_line_end"] = chunk_line_end      # Chunk range
 
-        logger.info(f"Numeracja chunków: {len(chunks)} chunków przetworzonych")
+        logger.info("Chunk numbering: %d chunks processed", len(chunks))
 
-    def _add_line_numbers_to_legacy_chunks(self, chunks: List[Dict[str, Any]], original_doc: Document) -> None:
+    def _add_line_numbers_to_legacy_chunks(
+            self,
+            chunks: List[Dict[str, Any]],
+            original_doc: Document
+    ) -> None:
         """
-        Dodaje do każdego legacy chunka:
-        1. document_line_start/end - zakres STRONY źródłowej
-        2. embedding_line_start/end - zakres CHUNKA w oryginalnym pliku
+        Adds to each legacy chunk:
+        1. document_line_start/end - range of the SOURCE PAGE
+        2. embedding_line_start/end - range of the CHUNK in the original file
         """
         page_line_start = original_doc.metadata.get("document_line_start", 1)
         page_line_end = original_doc.metadata.get("document_line_end", 1)
@@ -387,11 +435,11 @@ class SearchKnowledgebase:
             chunk_text = chunk["text"]
             chunk_metadata = chunk["metadata"]
 
-            # 1. KOPIUJ zakres STRONY
+            # 1. COPY page range
             chunk_metadata["document_line_start"] = page_line_start
             chunk_metadata["document_line_end"] = page_line_end
 
-            # 2. OBLICZ zakres CHUNKA
+            # 2. CALCULATE chunk range
             chunk_position = page_text.find(chunk_text, current_position)
 
             if chunk_position == -1:
@@ -413,4 +461,4 @@ class SearchKnowledgebase:
 
             current_position = chunk_position + len(chunk_text)
 
-        logger.info(f"Legacy chunków: {len(chunks)} chunków przetworzonych")
+        logger.info("Legacy chunks: %d chunks processed", len(chunks))

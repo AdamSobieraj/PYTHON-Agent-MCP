@@ -1,4 +1,4 @@
-import io
+import json
 import logging
 import os
 import sys
@@ -7,184 +7,280 @@ from typing import Any, Dict, Generator, List, Tuple
 from langchain_core.documents import Document
 
 from DataLoaderS3Service import DataLoaderS3Service
-from buissnes_agent.MetadataModels import FileMetadata
-from buissnes_agent.parsers import (
-    BaseDocumentParser,
-    DocxParser,
-    PdfParser,
-    PptxParser,
-    TextParser,
-    XlsxParser,
-)
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 
 class DataLoaderS3FileLoader:
+    """
+    Reads pre-converted .md files and _metadata.json files
+    saved by Project 1 (MarkDownConverter pipeline).
+
+    Responsibilities:
+        - List .md files from S3 _markdown folders
+        - Download markdown content
+        - Download associated metadata JSON
+        - Return (List[Document], Dict) to the orchestrator
+
+    NOT responsible for:
+        - Parsing PDF/DOCX/XLSX etc.
+        - Converting files to Markdown
+        - Saving anything to S3
+    """
+
     def __init__(self, bucket_name: str, prefix: str):
         self.bucket_name = bucket_name
-        # 1. Usuwamy białe znaki
+        # 1. Remove whitespace
         clean_prefix = prefix.strip() if prefix else ""
-        # 2. Jeśli prefix jest podany, upewniamy się, że kończy się slashem "/"
+        # 2. If prefix is provided, make sure it ends with slash "/"
         if clean_prefix:
             if not clean_prefix.endswith("/"):
                 self.prefix = f"{clean_prefix}/"
             else:
                 self.prefix = clean_prefix
-            logger.info("S3FileLoader: Ustawiono filtr na folder: '%s'", self.prefix)
+            logger.info("S3FileLoader: Filter set to folder: '%s'", self.prefix)
         else:
-            # 3. Jeśli prefix jest pusty -> OSTRZEŻENIE
+            # 3. If prefix is empty -> WARNING
             self.prefix = ""
             logger.warning(
-                "!!! UWAGA: Nie podano folderu (prefix). Skrypt pobierze CALY BUCKET !!!"
+                "!!! WARNING: No folder (prefix) provided. "
+                "Script will scan the ENTIRE BUCKET for .md files !!!"
             )
 
         self.s3_service = DataLoaderS3Service()
 
-        # Create heavy parsers only when a file with the matching extension is used.
-        self.parser_factories: Dict[str, type[BaseDocumentParser]] = {
-            ".xlsx": XlsxParser,
-            ".pdf": PdfParser,
-            ".docx": DocxParser,
-            ".pptx": PptxParser,
-        }
-        self.parsers: Dict[str, BaseDocumentParser] = {}
-        # Domyślny parser dla tekstów (TXT, JSON, XML, itd.)
-        self.default_parser = TextParser()
+    # ==========================================================================
+    # PUBLIC INTERFACE - matches DataLoaderInterface protocol
+    # ==========================================================================
 
     def list_objects(self) -> Generator[str, None, None]:
-        # Przekazujemy prefix do serwisu S3. AWS zwróci tylko obiekty zaczynające się od tego ciągu.
-        return self.s3_service.list_objects(self.bucket_name, self.prefix)
-
-    def save_markdown_to_s3(self, s3_key: str, documents: List[Document]) -> str:
         """
-        Zapisuje dokumenty Markdown do S3 w folderze o takiej samej nazwie jak oryginalny + '_markdown'.
-
-        Args:
-            s3_key: Klucz S3 pliku źródłowego (np. "technical/ISO20022/plik.pdf")
-            documents: Lista dokumentów z zawartością Markdown
-
-        Returns:
-            Klucz S3 zapisanego pliku Markdown (ścieżka w S3)
+        Returns file keys only from the given prefix (folder).
+        Skips _metadata.json files - those are loaded separately per .md file.
         """
-        # Pobierz nazwę pliku bez rozszerzenia
-        filename_without_ext = os.path.splitext(os.path.basename(s3_key))[0]
-        # Pobierz ścieżkę folderów z klucza S3
-        s3_dir = os.path.dirname(s3_key)
-        # Dodaj suffix '_markdown' do struktury folderów
-        if s3_dir:
-            # Jeśli jest struktura folderów, dodaj '_markdown' na końcu
-            markdown_dir = s3_dir + "_markdown"
-        else:
-            # Jeśli plik był w głównym katalogu bucketa
-            markdown_dir = "root_markdown"
-        # Ścieżka do pliku Markdown w S3
-        markdown_filename = f"{filename_without_ext}.md"
-        markdown_s3_key = f"{markdown_dir}/{markdown_filename}"
-        # Połącz wszystkie dokumenty w jeden string Markdown
-        markdown_content: List[str] = []
-        for index, doc in enumerate(documents):
-            if index > 0:
-                markdown_content.append("\n\n---\n\n") # Separator między stronami/sekcjami
-            markdown_content.append(doc.page_content)
+        paginator = self.s3_service.s3_client.get_paginator('list_objects_v2')
 
-        full_markdown = "".join(markdown_content)
-
+        # Key moment: the Prefix parameter filters files on the AWS side
+        # Thanks to this, we don't fetch the list of the entire bucket
         try:
-            markdown_bytes = full_markdown.encode("utf-8")
-            self.s3_service.upload_bytes(
-                bucket_name=self.bucket_name,
-                key=markdown_s3_key,
-                data=markdown_bytes,
-                content_type="text/markdown",
-            )
+            for page in paginator.paginate(
+                Bucket=self.bucket_name,
+                Prefix=self.prefix
+            ):
+                if 'Contents' not in page:
+                    continue
 
-            s3_url = f"s3://{self.bucket_name}/{markdown_s3_key}"
-            logger.info("Zapisano Markdown do S3: %s", s3_url)
-            return s3_url
-        except Exception as exc:
-            logger.error("Blad podczas zapisywania Markdown do S3: %s", exc)
+                for obj in page['Contents']:
+                    key = obj['Key']
+
+                    # Ignore the folder itself (if AWS returns it as an object)
+                    if key.endswith('/'):
+                        continue
+
+                    # Skip metadata JSON files - loaded separately
+                    if key.lower().endswith('_metadata.json'):
+                        continue
+
+                    # Only yield markdown files
+                    if key.lower().endswith('.md'):
+                        yield key
+
+        except Exception as e:
+            logger.error("S3Service Error listing objects: %s", e)
             raise
 
-    def load_file_with_metadata(self, s3_key: str) -> Tuple[List[Document], Dict[str, Any]]:
-        filename = os.path.basename(s3_key)
-        ext = os.path.splitext(s3_key)[1].lower()
-        domain_value = self._extract_domain_first(s3_key)
-        # Tworzenie metadanych
-        meta_obj = FileMetadata(
-            source=f"s3://{self.bucket_name}/{s3_key}",
-            title=filename,
-            extension=ext,
-            url=f"https://{self.bucket_name}.s3.amazonaws.com/{s3_key}",
-            domain=domain_value,# <--- Podstawienie dynamicznej domeny
+    def load_file_with_metadata(
+        self,
+        md_key: str
+    ) -> Tuple[List[Document], Dict[str, Any]]:
+        """
+        Fetches the markdown file content and its metadata based on the key.
 
-            # Dodajemy domenę do tagów (z małych liter) dla lepszego filtrowania w bazie wektorowej
-            tags=["s3_storage", "cloud", domain_value.lower()],
-            page_number=None, # Cały plik, więc brak konkretnej strony
-        )
+        Steps:
+            1. Download .md file content from S3
+            2. Download _metadata.json saved by Project 1
+            3. Create Document object from markdown content
+            4. Return (documents, metadata)
 
-        documents: List[Document] = []
-        base_metadata = meta_obj.to_dict()
+        Returns: (list_of_pages_as_documents, base_metadata_dict)
+        """
+        logger.info("S3FileLoader: Loading markdown file: %s", md_key)
 
         try:
-            # 1. Pobieramy bajty z chmury do pamięci RAM
-            file_bytes = self.s3_service.download_bytes(self.bucket_name, s3_key)
-            # 2. Wybieramy odpowiedni parser
-            parser = self._get_parser(ext)
-            # 3. Parsowanie - w zależności od formatu wysyłamy bajty lub strumień (BytesIO)
-            # TextParser poradzi sobie z czystymi bajtami. Pozostałe (openpyxl, docx, pypdf) potrzebują BytesIO
-            if ext in self.parser_factories:
-                file_source = io.BytesIO(file_bytes)
-            else:
-                file_source = file_bytes
-            # 4. Magia dzieje się tutaj - parser przetwarza plik w pamięci i oddaje Markdown
-            documents = parser.parse(file_source, ext=ext)
-            # 5. Wzbogacamy strony o metadane globalne S3
-            for doc in documents:
-                merged_meta = base_metadata.copy()
-                merged_meta.update(doc.metadata)
-                doc.metadata = merged_meta
-            # 6. Zapisz Markdown do S3 i dodaj ścieżkę do metadanych
-            if documents:
-                markdown_s3_path = self.save_markdown_to_s3(s3_key, documents)
-                # Dodaj ścieżkę do Markdown w metadanych
-                base_metadata["markdown_path"] = markdown_s3_path
-                base_metadata["markdown_url"] = (
-                    f"https://{self.bucket_name}.s3.amazonaws.com/"
-                    f"{markdown_s3_path.replace('s3://' + self.bucket_name + '/', '')}"
-                )
+            # Step 1: Download markdown content
+            markdown_text = self._download_markdown(md_key)
 
-                for doc in documents:
-                    doc.metadata["markdown_path"] = markdown_s3_path
-                    doc.metadata["markdown_url"] = base_metadata["markdown_url"]
+            if not markdown_text:
+                logger.warning("S3FileLoader: Empty markdown file: %s", md_key)
+                return [], {}
 
-            return documents, base_metadata
-        except Exception as exc:
-            logger.error("Krytyczny blad przy pliku %s: %s", s3_key, exc)
-            return [], {} # <--- POPRAWKA: Zwraca pustą listę zamiast "", zapobiega błędom w Orkiestratorze
+            # Step 2: Load metadata JSON saved by Project 1
+            base_metadata = self._load_metadata_json(md_key)
+
+            # Step 3: Enrich metadata with any missing fields we can derive
+            base_metadata = self._enrich_metadata(md_key, base_metadata)
+
+            # Step 4: Create Document
+            doc = Document(
+                page_content=markdown_text,
+                metadata=base_metadata.copy()
+            )
+
+            logger.info(
+                "S3FileLoader: Successfully loaded '%s' "
+                "(%d chars, %d metadata keys)",
+                md_key,
+                len(markdown_text),
+                len(base_metadata)
+            )
+
+            return [doc], base_metadata
+
+        except Exception as e:
+            logger.error(
+                "Critical error at file %s: %s",
+                md_key, e
+            )
+            # Returns empty list instead of "", prevents errors in Orchestrator
+            return [], {}
+
+    # ==========================================================================
+    # PRIVATE HELPERS
+    # ==========================================================================
+
+    def _download_markdown(self, md_key: str) -> str:
+        """
+        Downloads markdown file content from S3.
+
+        Args:
+            md_key: S3 key of the .md file
+
+        Returns:
+            Markdown content as string
+        """
+        try:
+            text = self.s3_service.download_text(self.bucket_name, md_key)
+            logger.debug(
+                "S3FileLoader: Downloaded markdown '%s' (%d chars)",
+                md_key, len(text)
+            )
+            return text
+        except Exception as e:
+            logger.error(
+                "S3FileLoader: Failed to download markdown '%s': %s",
+                md_key, e
+            )
+            raise
+
+    def _load_metadata_json(self, md_key: str) -> Dict[str, Any]:
+        """
+        Downloads and parses the _metadata.json file associated
+        with the given markdown file.
+
+        Project 1 naming convention (from S3DataSaver._build_metadata_key):
+            "technical/ISO20022_markdown/file.md"
+         -> "technical/ISO20022_markdown/file_metadata.json"
+
+        Args:
+            md_key: S3 key of the .md file
+
+        Returns:
+            Metadata dictionary, or empty dict if not found
+        """
+        metadata_key = self._build_metadata_key(md_key)
+
+        try:
+            json_text = self.s3_service.download_text(
+                self.bucket_name,
+                metadata_key
+            )
+            metadata = json.loads(json_text)
+            logger.debug(
+                "S3FileLoader: Loaded metadata from '%s' (%d keys)",
+                metadata_key, len(metadata)
+            )
+            return metadata
+
+        except Exception as e:
+            logger.warning(
+                "S3FileLoader: Metadata not found for '%s' "
+                "(expected at '%s'): %s. Using empty metadata.",
+                md_key, metadata_key, e
+            )
+            return {}
+
+    def _build_metadata_key(self, md_key: str) -> str:
+        """
+        Derives the metadata JSON S3 key from the markdown S3 key.
+
+        Mirrors Project 1's S3DataSaver._build_metadata_key() naming:
+            "technical/ISO20022_markdown/file.md"
+         -> "technical/ISO20022_markdown/file_metadata.json"
+
+        Args:
+            md_key: S3 key of the .md file
+
+        Returns:
+            S3 key of the associated _metadata.json file
+        """
+        # Remove .md extension, append _metadata.json
+        base = os.path.splitext(md_key)[0]
+        return f"{base}_metadata.json"
+
+    def _enrich_metadata(
+        self,
+        md_key: str,
+        metadata: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Adds any metadata fields that might be missing from the JSON.
+        Uses derivable information from the S3 key itself as fallback.
+
+        Args:
+            md_key: S3 key of the .md file
+            metadata: Metadata loaded from _metadata.json
+
+        Returns:
+            Enriched metadata dictionary
+        """
+        enriched = metadata.copy()
+
+        # Fallback: markdown_path (should already be in Project 1 metadata)
+        if 'markdown_path' not in enriched:
+            enriched['markdown_path'] = md_key
+
+        # Fallback: markdown_url
+        if 'markdown_url' not in enriched:
+            enriched['markdown_url'] = (
+                f"https://{self.bucket_name}.s3.amazonaws.com/{md_key}"
+            )
+
+        # Fallback: source (should already exist from Project 1's FileMetadata)
+        if 'source' not in enriched:
+            enriched['source'] = f"s3://{self.bucket_name}/{md_key}"
+
+        # Fallback: domain
+        if 'domain' not in enriched:
+            enriched['domain'] = self._extract_domain_first(md_key)
+
+        # Fallback: extension (original file extension, not .md)
+        if 'extension' not in enriched:
+            enriched['extension'] = '.md'
+
+        return enriched
 
     def _extract_domain_first(self, s3_key: str) -> str:
         """
-        Zawsze pobiera GŁÓWNY (najwyższy) folder wprost z klucza S3.
-        Np. dla klucza "technical/ISO20022/MDR/plik.pdf" zwróci "technical".
+        Always fetches the MAIN (highest) folder directly from the S3 key.
+        E.g., for key "technical/ISO20022/MDR/file.pdf" will return "technical".
         """
-        # Zabezpieczenie: usuwamy ewentualne ukośniki na samym początku klucza
+        # Safety: remove any leading slashes from the key
         clean_key = s3_key.lstrip("/")
         parts = clean_key.split("/")
 
         if len(parts) > 1:
-            # Bierzemy ZAWSZE pierwszy, najwyższy folder w hierarchii bucketa
+            # Always take the FIRST, highest folder in the bucket hierarchy
             return parts[0]
-            # Plik leży bezpośrednio w roocie bucketa, bez żadnego folderu
+        # File lies directly in the bucket root, without any folder
         return "general"
-
-    def _get_parser(self, ext: str) -> BaseDocumentParser:
-        if ext not in self.parser_factories:
-            return self.default_parser
-
-        if ext not in self.parsers:
-            logger.info("S3FileLoader: Inicjalizacja parsera dla rozszerzenia '%s'", ext)
-            self.parsers[ext] = self.parser_factories[ext]()
-
-        return self.parsers[ext]
