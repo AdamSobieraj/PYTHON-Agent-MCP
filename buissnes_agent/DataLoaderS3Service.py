@@ -6,8 +6,6 @@ from typing import Generator
 import boto3
 from dotenv import load_dotenv
 
-from buissnes_agent.config_loader import get_settings
-
 logger = logging.getLogger(__name__)
 
 load_dotenv()

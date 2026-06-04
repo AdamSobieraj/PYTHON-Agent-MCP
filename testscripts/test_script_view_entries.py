@@ -2,7 +2,9 @@ import os
 import sys
 import logging
 import json  # <--- Dodano do pretty-printingu JSONa
+
 from dotenv import load_dotenv
+from buissnes_agent.config_loader import get_settings
 
 # Upewnij się, że ten import pasuje do struktury Twojego projektu
 from buissnes_agent.QdrantDatabaseStore import QdrantDatabaseStore
@@ -13,7 +15,7 @@ logger = logging.getLogger("DB-Viewer")
 
 # Ładowanie zmiennych środowiskowych
 load_dotenv()
-
+settings = get_settings()
 
 def view_entries(limit: int = 5):
     """
@@ -24,8 +26,8 @@ def view_entries(limit: int = 5):
     # 1. Pobieranie konfiguracji z .env
     qdrant_url = os.getenv("QDRANT_API")
     qdrant_key = os.getenv("QDRANT_API_KEY")
-    # collection_name = settings.get("vector_db.collection_name")
-    collection_name = "my_custom_collection_v2"
+    collection_name = settings.get("vector_db.collection_name")
+    # collection_name = "my_custom_collection_v2"
 
     if not qdrant_url:
         logger.error("Brak QDRANT_API w pliku .env")

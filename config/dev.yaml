@@ -5,7 +5,7 @@ data_source:
   type: "s3"
 
 data_s3_source:
-  input_path: "technical"
+  input_path: "General_markdown"
 
 vector_db:
   collection_name: "iso20022_dev"

@@ -73,7 +73,6 @@ class DataLoaderLocalFileLoader:
         Returns file paths only from the markdown directory.
         Skips _metadata.json files - those are loaded separately per .md file.
         """
-        allowed_exts = self.settings.get("chunking.allowed_extensions", [])
 
         if not os.path.exists(self.markdown_directory):
             logger.error(
