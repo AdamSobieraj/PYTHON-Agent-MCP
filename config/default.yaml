@@ -24,7 +24,7 @@ data_source:
 # 2 & 3. CHUNKING I STRATEGIE
 # ==============================================================================
 chunking:
-  # CHUNKING_MODULE=legacy (Opcje: legacy, langchain)
+  # CHUNKING_MODULE=langchain
   module: "langchain"
 
   # Parametry globalne (Fallback)
@@ -83,48 +83,6 @@ chunking:
       # Default fallback
       def:
         strategy: "markdownHeaderTextSplitter"
-        size: 2000
-        overlap: 0
-
-    # =========================================================
-    # Strategie dla modułu LEGACY (LOCAL)
-    # =========================================================
-    legacy:
-      md:
-        strategy: "auto"
-        size: 1000
-        overlap: 100
-      txt:
-        strategy: "auto"
-        size: 1000
-        overlap: 200
-      xml:
-        strategy: "auto"
-        size: 600
-        overlap: 50
-      xsd:
-        strategy: "auto"
-        size: 600
-        overlap: 50
-      json:
-        strategy: "auto"
-        size: 500
-        overlap: 0
-      pdf:
-        strategy: "semanticChunker"
-        size: 1500
-        overlap: 200
-      docx:
-        strategy: "semanticChunker"
-        size: 1500
-        overlap: 200
-      xlsx:
-        strategy: "recursive"
-        size: 2000
-        overlap: 0
-      # Default fallback
-      def:
-        strategy: "auto"
         size: 2000
         overlap: 0
 

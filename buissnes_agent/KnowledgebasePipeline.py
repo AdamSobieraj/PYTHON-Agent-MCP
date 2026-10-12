@@ -8,7 +8,6 @@ from langchain_core.embeddings import Embeddings
 from buissnes_agent.config_loader import get_settings
 # Chunkings
 from buissnes_agent.textchunker.langchain.LangChainChunker import LangChainChunker
-from buissnes_agent.textchunker.noLibChunker.NoLibChunker import NoLibChunker as LegacyChunker
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
@@ -71,7 +70,7 @@ class SearchKnowledgebase:
 
     Executes the process in 3 steps:
     1. **Data Setup:** Selecting the appropriate Loader (S3 or Local).
-    2. **Logic Setup:** Selecting the appropriate Chunker (LangChain or Legacy).
+    2. **Logic Setup:** Selecting the chunking strategy (LangChain).
     3. **Execution (Pipeline):** Unified processing loop (Load -> Chunk -> Embed -> Store).
     """
 
@@ -161,7 +160,7 @@ class SearchKnowledgebase:
         Falls back to 'def' if the original extension is unknown.
         """
         settings = get_settings()
-        chunk_module = settings.get("chunking.module")
+        chunk_module = settings.get("chunking.module", "langchain")
 
         # All files arriving here are .md (pre-converted by Project 1).
         # We read the ORIGINAL extension from metadata to select the correct
@@ -172,37 +171,17 @@ class SearchKnowledgebase:
 
         chunk_size, chunk_overlap, strategy = self._get_chunk_config(chunk_module, ext)
 
-        if chunk_module in ["langchain"]:
-            logger.info(
-                "LOGIC LAYER: LangChainChunker selected. Strategy: %s",
-                strategy
-            )
-            chunker_engine = LangChainChunker(strategy, chunk_size, chunk_overlap)
-            processed_chunks = chunker_engine.process_content(documents_list)
+        logger.info(
+            "LOGIC LAYER: LangChainChunker selected. Strategy: %s",
+            strategy
+        )
+        chunker_engine = LangChainChunker(strategy, chunk_size, chunk_overlap)
+        processed_chunks = chunker_engine.process_content(documents_list)
 
-            # Add line numbers to chunks
-            self._add_line_numbers_to_chunks(processed_chunks, documents_list)
+        # Add line numbers to chunks
+        self._add_line_numbers_to_chunks(processed_chunks, documents_list)
 
-            return processed_chunks
-
-        else:
-            logger.info("LOGIC LAYER: Legacy Chunker selected.")
-            chunker_engine = LegacyChunker(strategy, chunk_size, chunk_overlap)
-
-            # Process with legacy system page by page
-            all_legacy_chunks = []
-
-            for doc in documents_list:
-                # doc.metadata already contains correct page_number (1, 2, 3...)
-                # doc.page_content is text only from this specific page
-                page_chunks = chunker_engine.process_content(doc.page_content, doc.metadata)
-
-                # Add line numbers for legacy chunks
-                self._add_line_numbers_to_legacy_chunks(page_chunks, doc)
-
-                all_legacy_chunks.extend(page_chunks)
-
-            return all_legacy_chunks
+        return processed_chunks
 
     def _embed_and_queue_batch(
             self,
@@ -269,10 +248,7 @@ class SearchKnowledgebase:
         chunk_size = ext_config.get("size", global_default_size)
         chunk_overlap = ext_config.get("overlap", global_default_overlap)
 
-        strategy = ext_config.get(
-            "strategy",
-            "recursive" if module_name == "langchain" else "auto"
-        )
+        strategy = ext_config.get("strategy", "recursive")
 
         return int(chunk_size), int(chunk_overlap), str(strategy)
 
@@ -414,51 +390,3 @@ class SearchKnowledgebase:
             chunk_metadata["embedding_line_end"] = chunk_line_end      # Chunk range
 
         logger.info("Chunk numbering: %d chunks processed", len(chunks))
-
-    def _add_line_numbers_to_legacy_chunks(
-            self,
-            chunks: List[Dict[str, Any]],
-            original_doc: Document
-    ) -> None:
-        """
-        Adds to each legacy chunk:
-        1. document_line_start/end - range of the SOURCE PAGE
-        2. embedding_line_start/end - range of the CHUNK in the original file
-        """
-        page_line_start = original_doc.metadata.get("document_line_start", 1)
-        page_line_end = original_doc.metadata.get("document_line_end", 1)
-        page_text = original_doc.page_content
-
-        current_position = 0
-
-        for chunk in chunks:
-            chunk_text = chunk["text"]
-            chunk_metadata = chunk["metadata"]
-
-            # 1. COPY page range
-            chunk_metadata["document_line_start"] = page_line_start
-            chunk_metadata["document_line_end"] = page_line_end
-
-            # 2. CALCULATE chunk range
-            chunk_position = page_text.find(chunk_text, current_position)
-
-            if chunk_position == -1:
-                chunk_position = current_position
-
-            text_before_chunk = page_text[:chunk_position]
-            lines_before = text_before_chunk.count('\n')
-
-            lines_in_chunk = chunk_text.count('\n')
-
-            chunk_line_start = page_line_start + lines_before
-            chunk_line_end = chunk_line_start + lines_in_chunk
-
-            if chunk_text and not chunk_text.endswith('\n'):
-                chunk_line_end += 1
-
-            chunk_metadata["embedding_line_start"] = chunk_line_start
-            chunk_metadata["embedding_line_end"] = chunk_line_end
-
-            current_position = chunk_position + len(chunk_text)
-
-        logger.info("Legacy chunks: %d chunks processed", len(chunks))

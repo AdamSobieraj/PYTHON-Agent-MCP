@@ -10,7 +10,6 @@ Projekt rozdziela logikę na **Serwer MCP** (udostępniający narzędzia i wiedz
 
 *   **Architektura Client-Server (MCP):** Separacja bazy wiedzy od logiki agenta. Obsługa transportu **STDIO** (lokalnie) oraz **SSE** (HTTP/Sieć).
 *   **Modułowy ETL & Chunking:** Możliwość dynamicznej zmiany strategii podziału tekstu za pomocą `.env`:
-    *   *Legacy:* Prosty podział na zdania/paragrafy.
     *   *LangChain Advanced:* `MarkdownHeaderTextSplitter`, `SemanticChunker`, `RecursiveCharacterTextSplitter`.
 *   **Local-First AI:** Domyślna konfiguracja pod **LM Studio** (model Hermes-4-70B) oraz lokalne embeddingi (**Nomic Embed**). Pełna kompatybilność z OpenAI.
 *   **Baza Wektorowa Qdrant:** Przechowywanie i wyszukiwanie semantyczne fragmentów dokumentacji.

@@ -48,7 +48,7 @@ class FileMetadata(BaseMetadata):
 @dataclass
 class ChunkMetadata(BaseMetadata):
     """
-    Model used by Chunkers (LangChain/NoLib).
+    Model used by Chunkers (LangChain).
     Represents a single vector in the Qdrant database.
     """
     phrase: str = ""                            # Fragment content

@@ -9,6 +9,10 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from buissnes_agent.textchunker.langchain.base import ChunkingStrategy
 from .strategies import (
     MarkdownHeaderStrategy,
+    NewAgenticStrategy,
+    NewFixedSizeStrategy,
+    NewSemanticStrategy,
+    NewSentenceBasedStrategy,
     RecursiveStrategy,
     UnstructuredStrategy,
     SemanticStrategy
@@ -62,6 +66,14 @@ class LangChainChunker:
             return SemanticStrategy()
         elif self.chunk_strategy == "recursive":
             return RecursiveStrategy(self.chunk_size, self.chunk_overlap)
+        elif self.chunk_strategy == "newFixedSizeStrategy":
+            return NewFixedSizeStrategy(self.chunk_size, self.chunk_overlap)
+        elif self.chunk_strategy == "newSentenceBasedStrategy":
+            return NewSentenceBasedStrategy(self.chunk_size, self.chunk_overlap)
+        elif self.chunk_strategy == "newSemanticStrategy":
+            return NewSemanticStrategy(self.chunk_size, self.chunk_overlap)
+        elif self.chunk_strategy == "newAgenticStrategy":
+            return NewAgenticStrategy(self.chunk_size, self.chunk_overlap)
         else:
             # Fallback - if strategy unknown, use safe recursive
             logger.warning(
