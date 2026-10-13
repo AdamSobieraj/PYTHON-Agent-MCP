@@ -34,12 +34,13 @@ def view_entries(limit: int = 5):
         return
 
     # 2. Inicjalizacja Twojej klasy Store
+    vector_size = 1536
     try:
         store = QdrantDatabaseStore(
             url=qdrant_url,
             api_key=qdrant_key,
             collection_name=collection_name,
-            vector_size=1536
+            vector_size=vector_size
         )
     except Exception as e:
         logger.error(f"Nie udało się połączyć z Qdrant: {e}")
@@ -82,6 +83,66 @@ def view_entries(limit: int = 5):
 
     except Exception as e:
         logger.error(f"Błąd podczas pobierania danych: {e}")
+
+    # 5. Podsumowanie bazy (rozmiar i liczba chunków)
+    print_db_summary(store, collection_name, vector_size)
+
+
+def print_db_summary(store, collection_name: str, vector_size: int):
+    """
+    Wyświetla podsumowanie bazy danych:
+    - liczbę chunków (punktów),
+    - rozmiar bazy w bajtach (payload + wektory) oraz rozmiar w formie czytelnej.
+    """
+    print(f"\n{'=' * 80}")
+    print(f"PODSUMOWANIE BAZY DANYCH: {collection_name}")
+    print(f"{'=' * 80}")
+
+    def human(n: float) -> str:
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
+            if n < 1024.0 or unit == 'PB':
+                return f"{int(n)} B" if unit == 'B' else f"{n:,.2f} {unit}"
+            n /= 1024.0
+
+    try:
+        # Liczba chunków (punktów) w kolekcji
+        points_count = store.count()
+
+        if points_count == 0:
+            print("Liczba chunków:      0")
+            print("Rozmiar bazy:        0 B (baza pusta)")
+            print(f"{'=' * 80}")
+            return
+
+        # Rozmiar payloadów — przeliczamy, przeskanowując wszystkie wpisy
+        payload_bytes = 0
+        offset = None
+        page_size = 1000
+        while True:
+            records, offset = store.client.scroll(
+                collection_name=collection_name,
+                limit=page_size,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False
+            )
+            for record in records:
+                payload_bytes += len(json.dumps(record.payload, ensure_ascii=False).encode('utf-8'))
+            if offset is None:
+                break
+
+        # Rozmiar wektorów — znany: liczba punktów * wymiar * 4 bajty (float32)
+        vector_bytes = points_count * vector_size * 4
+        total_bytes = payload_bytes + vector_bytes
+
+        print(f"Liczba chunków:        {points_count:,}")
+        print(f"Rozmiar payloadów:     {human(payload_bytes)} ({payload_bytes:,} B)")
+        print(f"Rozmiar wektorów:      {human(vector_bytes)} ({vector_bytes:,} B)")
+        print(f"ŁĄCZNY ROZMIAR BAZY:   {human(total_bytes)} ({total_bytes:,} B)")
+        print(f"{'=' * 80}")
+
+    except Exception as e:
+        logger.error(f"Błąd podczas generowania podsumowania bazy: {e}")
 
 
 if __name__ == "__main__":
