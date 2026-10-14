@@ -1,14 +1,14 @@
 # ==============================================================================
-# KONFIGURACJA GŁÓWNA APLIKACJI
+# MAIN APPLICATION CONFIGURATION
 # ==============================================================================
 app:
   name: "Business Agent Core"
   env: "default"
-  # Opcja force_refresh znana z kodu Python
+  # force_refresh option known from the Python code
   force_refresh: false
 
 # ==============================================================================
-# 1 & 4. ŹRÓDŁA DANYCH (S3 / LOCAL)
+# 1 & 4. DATA SOURCES (S3 / LOCAL)
 # ==============================================================================
 data_s3_source:
   input_path: "business"
@@ -17,17 +17,17 @@ data_source:
   # DATA_SOURCE=s3
   type: "local"
 
-  # INPUT_DIRECTORY (ścieżka do odczytu lokalnego przez loadera)
+  # INPUT_DIRECTORY (local read path for the loader)
   local_input_path: "/home/blackmain/PycharmProjects/PYTHON-Agent-MCP/buissnes_agent/inputs"
 
 # ==============================================================================
-# 2 & 3. CHUNKING I STRATEGIE
+# 2 & 3. CHUNKING AND STRATEGIES
 # ==============================================================================
 chunking:
   # CHUNKING_MODULE=langchain
   module: "langchain"
 
-  # Parametry globalne (Fallback)
+  # Global parameters (Fallback)
   default_size: 600
   default_overlap: 100
 
@@ -42,52 +42,52 @@ chunking:
     - ".xlsx"
     - ".json"
 
-  # Konfiguracja strategii
+  # Strategy configuration
   strategies:
     # =========================================================
-    # Strategie dla modułu LANGCHAIN
+    # Strategies for the LANGCHAIN module
     # =========================================================
     langchain:
       md:
-        strategy: "markdownHeaderTextSplitter"
+        strategy: "sentenceBased"
         size: 1000
         overlap: 100
       txt:
-        strategy: "markdownHeaderTextSplitter"
+        strategy: "sentenceBased"
         size: 1000
         overlap: 200
       xml:
-        strategy: "markdownHeaderTextSplitter"
+        strategy: "sentenceBased"
         size: 600
         overlap: 50
       xsd:
-        strategy: "markdownHeaderTextSplitter"
+        strategy: "sentenceBased"
         size: 600
         overlap: 50
       json:
-        strategy: "markdownHeaderTextSplitter"
+        strategy: "sentenceBased"
         size: 500
         overlap: 0
       pdf:
-        strategy: "markdownHeaderTextSplitter"
+        strategy: "sentenceBased"
         size: 1500
         overlap: 200
       docx:
-        strategy: "markdownHeaderTextSplitter"
+        strategy: "sentenceBased"
         size: 1500
         overlap: 200
       xlsx:
-        strategy: "recursive"
+        strategy: "fixedSize"
         size: 2000
         overlap: 0
       # Default fallback
       def:
-        strategy: "markdownHeaderTextSplitter"
+        strategy: "sentenceBased"
         size: 2000
         overlap: 0
 
 # ==============================================================================
-# 5. BAZA WEKTOROWA (QDRANT)
+# 5. VECTOR DATABASE (QDRANT)
 # ==============================================================================
 vector_db:
   # COLLECTION_NAME

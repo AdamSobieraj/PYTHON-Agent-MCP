@@ -8,7 +8,7 @@ import qdrant_client
 from dotenv import load_dotenv
 from buissnes_agent.EmbeddingClient import LocalEmbeddingClient
 
-# ===== METRYKI: IMPORT =====
+# ===== METRICS: IMPORT =====
 try:
     from buissnes_agent.tools.rag_metrics import (
         MetricsCalculator,
@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_VECTOR_AMOUNT_RAG = 10
 
 # ==============================================================================
-# ZASOBY GLOBALNE (SINGLETONY)
+# GLOBAL RESOURCES (SINGLETONS)
 # ==============================================================================
-# Przechowujemy instancje klienta Qdrant i modelu Embeddingów globalnie,
-# aby nie tworzyć nowego połączenia przy każdym zapytaniu (optymalizacja).
+# We keep the Qdrant client and embedding model instances globally,
+# so we don't create a new connection on every query (optimization).
 _qdrant_client: Optional[qdrant_client.QdrantClient] = None
 _embeddings: Optional[LocalEmbeddingClient] = None
 
@@ -38,40 +38,40 @@ load_dotenv()
 
 def _init_resources():
     """
-    ### LENIWA INICJALIZACJA ZASOBÓW (Lazy Loading)
+    ### LAZY RESOURCE INITIALIZATION (Lazy Loading)
 
-    Ta funkcja jest wywoływana dopiero przy pierwszym użyciu narzędzia.
+    This function is called only on the first use of the tool.
 
-    Dlaczego:
-    1. Szybszy start serwera (nie czekamy na połączenie z bazą przy bootowaniu).
-    2. Odporność na błędy (jeśli Qdrant leży, serwer wstanie, a błąd pojawi się dopiero przy pytaniu).
+    Why:
+    1. Faster server startup (we don't wait for the DB connection at boot).
+    2. Fault tolerance (if Qdrant is down, the server still starts, and the error only appears on the query).
     """
     global _qdrant_client, _embeddings
 
-    # Jeśli zasoby już istnieją, nie rób nic.
+    # If the resources already exist, do nothing.
     if _qdrant_client and _embeddings:
         return
 
     try:
-        # Pobranie konfiguracji Qdrant z .env
+        # Fetch Qdrant configuration from .env
         qdrant_url = os.getenv('QDRANT_API')
         qdrant_key = os.getenv('QDRANT_API_KEY')
 
-        # Weryfikacja tylko dla Qdranta, bo LocalEmbeddingClient sam sprawdza swoje zmienne
+        # Verification only for Qdrant, since LocalEmbeddingClient checks its own variables itself
         if not qdrant_url:
             raise ValueError("Brak zmiennej QDRANT_API w pliku .env")
 
-        # 1. Inicjalizacja klienta bazy wektorowej Qdrant
+        # 1. Initialize the Qdrant vector database client
         logger.info(f"Łączenie z Qdrant: {qdrant_url}")
         _qdrant_client = qdrant_client.QdrantClient(
             url=qdrant_url,
             api_key=qdrant_key,
-            # timeout=60 # Opcjonalnie można zwiększyć timeout
+            # timeout=60 # Optionally increase the timeout
         )
 
-        # 2. Inicjalizacja modelu Embeddingów (Local Embedding Client)
-        # Klasa sama zaciąga: EMBEDDING_BASE_URL, EMBEDDING_API_KEY, EMBEDDING_MODEL z .env
-        # oraz automatycznie naprawia błędy 400 Bad Request.
+        # 2. Initialize the embedding model (Local Embedding Client)
+        # The class itself pulls: EMBEDDING_BASE_URL, EMBEDDING_API_KEY, EMBEDDING_MODEL from .env
+        # and automatically fixes 400 Bad Request errors.
         logger.info("Inicjalizacja LocalEmbeddingClient...")
         _embeddings = LocalEmbeddingClient()
 
@@ -84,12 +84,12 @@ def _init_resources():
         raise e
 
 # ==============================================================================
-# METODY POMOCNICZE METRYK (wydzielone)
+# METRIC HELPER METHODS (separated)
 # ==============================================================================
 
 def _measure_embedding_time(embedder, query: str) -> Tuple[list, int]:
     """
-    Generuje embedding z pomiarem czasu
+    Generate embedding with time measurement
 
     Returns:
         tuple: (query_vector, embedding_latency_ms)
@@ -102,7 +102,7 @@ def _measure_embedding_time(embedder, query: str) -> Tuple[list, int]:
 
 def _measure_search_time(client, collection_name: str, query_vector: list, top_k: int):
     """
-    Wykonuje search z pomiarem czasu
+    Perform search with time measurement
 
     Returns:
         tuple: (search_response, search_latency_ms)
@@ -158,20 +158,20 @@ def resolve_top_k(top_k: int | None = None) -> int:
 
 def _format_search_results(points) -> str:
     """
-    Formatuje wyniki wyszukiwania do czytelnego tekstu
+    Format search results into readable text
 
     Args:
-        points: Lista punktów z Qdrant
+        points: List of points from Qdrant
 
     Returns:
-        str: Sformatowany output
+        str: Formatted output
     """
     formatted_output = []
 
     for i, point in enumerate(points, 1):
         payload = point.payload or {}
 
-        # Ekstrakcja pól z payloadu
+        # Extract fields from the payload
         content = payload.get("phrase") or payload.get("text") or "[BRAK TREŚCI]"
         title = payload.get("title", "Bez tytułu")
         source_path = payload.get("source", "Nieznane źródło")
@@ -203,7 +203,7 @@ def _format_search_results(points) -> str:
 
 
 # ==============================================================================
-# GŁÓWNA FUNKCJA RAG Z METRYKAMI
+# MAIN RAG FUNCTION WITH METRICS
 # ==============================================================================
 
 def run_generic_rag_with_metrics(
@@ -212,29 +212,29 @@ def run_generic_rag_with_metrics(
         top_k: int | None = None,
 ) -> Tuple[str, Optional[RetrievalMetrics]]:
     """
-    RAG z pełnymi metrykami retrieval (jeśli włączone w ENV)
+    RAG with full retrieval metrics (if enabled in ENV)
 
     Args:
-        query: Pytanie użytkownika
-        collection_name: Nazwa kolekcji w Qdrant
+        query: User question
+        collection_name: Collection name in Qdrant
 
     Returns:
         tuple: (formatted_output, retrieval_metrics)
-               Jeśli ENABLE_RAG_METRICS=false, metrics będzie None
+               If the metrics repository is unavailable, metrics will be None
     """
-    # Start timer dla całego procesu
+    # Start timer for the whole process
     total_start = time.time()
 
     top_k = resolve_top_k(top_k)
 
-    # ===== OBSŁUGA BŁĘDÓW INICJALIZACJI =====
+    # ===== INITIALIZATION ERROR HANDLING =====
     try:
         _init_resources()
     except Exception as e:
         error_msg = f"Błąd techniczny: Nie udało się połączyć z bazą wiedzy ({str(e)})."
         total_latency = MetricsCalculator.calculate_latency_ms(total_start)
 
-        # Twórz metryki tylko jeśli włączone
+        # Create metrics only if enabled
         error_metrics = None
         if metrics_collector.is_enabled():
             error_metrics = MetricsCalculator.create_error_metrics(
@@ -266,19 +266,19 @@ def run_generic_rag_with_metrics(
 
     print(f"[RAG] Szukam: '{query}' w kolekcji '{collection_name}'", file=sys.stderr)
 
-    # ===== GŁÓWNA LOGIKA RETRIEVAL =====
+    # ===== MAIN RETRIEVAL LOGIC =====
     try:
-        # KROK 1: Generowanie wektora zapytania (z pomiarem czasu)
+        # STEP 1: Generate the query vector (with time measurement)
         query_vector, embedding_latency = _measure_embedding_time(embedder, query)
 
-        # KROK 2: Wyszukiwanie w Qdrant (z pomiarem czasu)
+        # STEP 2: Search in Qdrant (with time measurement)
         search_response, search_latency = _measure_search_time(
             client, collection_name, query_vector, top_k
         )
 
         points = search_response.points
 
-        # KROK 3: Obsługa pustych wyników
+        # STEP 3: Handle empty results
         if not points:
             no_results_msg = "Nie znaleziono relewantnych dokumentów w bazie"
             total_latency = MetricsCalculator.calculate_latency_ms(total_start)
@@ -297,10 +297,10 @@ def run_generic_rag_with_metrics(
 
             return no_results_msg, empty_metrics
 
-        # KROK 4: Formatowanie wyników
+        # STEP 4: Format the results
         formatted_output = _format_search_results(points)
 
-        # KROK 5: Tworzenie metryk (tylko jeśli włączone)
+        # STEP 5: Create metrics (only if enabled)
         total_latency = MetricsCalculator.calculate_latency_ms(total_start)
 
         metrics = None
@@ -336,7 +336,7 @@ def run_generic_rag_with_metrics(
 
 
 # ==============================================================================
-# BACKWARD COMPATIBILITY: Stara funkcja bez metryk
+# BACKWARD COMPATIBILITY: Old function without metrics
 # ==============================================================================
 
 def run_generic_rag(
@@ -345,10 +345,10 @@ def run_generic_rag(
     top_k: int | None = None,
 ) -> str:
     """
-    Oryginalna funkcja bez metryk (dla backward compatibility)
+    Original function without metrics (for backward compatibility)
 
-    Używa wewnętrznie run_generic_rag_with_metrics, ale zwraca tylko wynik.
-    Metryki są nadal zbierane w tle (jeśli ENABLE_RAG_METRICS=true).
+    Internally uses run_generic_rag_with_metrics but returns only the result.
+    Metrics are still collected in the background (if the metrics repository is available).
     """
     result, _ = run_generic_rag_with_metrics(
         query,

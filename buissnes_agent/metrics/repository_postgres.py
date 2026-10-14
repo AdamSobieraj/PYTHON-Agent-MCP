@@ -7,13 +7,19 @@ from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
 from .repository_interface import IMetricsRepository
-from .models import RetrievalMetrics, GenerationMetrics, FullRAGMetrics, MetricsStats
+from .models import (
+    RetrievalMetrics,
+    GenerationMetrics,
+    FullRAGMetrics,
+    ChunkingRunMetrics,
+    MetricsStats
+)
 
 logger = logging.getLogger(__name__)
 
 
 class PostgresConfig:
-    """Konfiguracja PostgreSQL z ENV"""
+    """PostgreSQL configuration from ENV"""
 
     @staticmethod
     def get_connection_params() -> Dict[str, Any]:
@@ -126,19 +132,59 @@ POSTGRES_SCHEMA = """
                   )
                       );
 
-                  CREATE INDEX IF NOT EXISTS idx_full_timestamp ON rag_full_metrics(timestamp); \
+                  CREATE INDEX IF NOT EXISTS idx_full_timestamp ON rag_full_metrics(timestamp);
+
+-- Tabela dla metryk fragmentacji (eksperymenty E1-E4)
+                  CREATE TABLE IF NOT EXISTS rag_chunking_metrics \
+                  ( \
+                      id SERIAL PRIMARY KEY, \
+                      experiment_id VARCHAR(255) NOT NULL, \
+                      strategy VARCHAR(64) NOT NULL, \
+                      source TEXT, \
+                      category VARCHAR(64), \
+                      chunk_size INTEGER, \
+                      chunk_overlap INTEGER, \
+                      batch_size INTEGER, \
+                      force_refresh BOOLEAN, \
+                      embedding_model VARCHAR(255), \
+                      llm_model VARCHAR(255), \
+                      python_version VARCHAR(32), \
+                      num_chunks INTEGER NOT NULL, \
+                      avg_chunk_len FLOAT, \
+                      max_chunk_len INTEGER, \
+                      empty_chunks INTEGER, \
+                      too_short_chunks INTEGER, \
+                      over_limit_chunks INTEGER, \
+                      over_limit_ratio FLOAT, \
+                      coverage FLOAT, \
+                      coherence FLOAT, \
+                      embedding_http_requests INTEGER, \
+                      texts_embedded INTEGER, \
+                      llm_calls INTEGER, \
+                      fallbacks INTEGER, \
+                      chunking_ms FLOAT, \
+                      embedding_ms FLOAT, \
+                      storage_ms FLOAT, \
+                      total_ms FLOAT, \
+                      timestamp TIMESTAMP NOT NULL DEFAULT NOW(), \
+                      created_at TIMESTAMP NOT NULL DEFAULT NOW() \
+                  );
+
+                  CREATE INDEX IF NOT EXISTS idx_chunking_experiment ON rag_chunking_metrics(experiment_id); \
+                  CREATE INDEX IF NOT EXISTS idx_chunking_strategy ON rag_chunking_metrics(strategy); \
+                  CREATE INDEX IF NOT EXISTS idx_chunking_timestamp ON rag_chunking_metrics(timestamp); \
                   """
 
 
 class PostgresMetricsRepository(IMetricsRepository):
-    """Implementacja repository dla PostgreSQL"""
+    """Repository implementation for PostgreSQL"""
 
     def __init__(self):
         self._pool: Optional[pool.SimpleConnectionPool] = None
         self._initialize_pool()
 
     def _initialize_pool(self):
-        """Inicjalizuj connection pool"""
+        """Initialize the connection pool"""
         if self._pool is not None:
             return
 
@@ -163,7 +209,7 @@ class PostgresMetricsRepository(IMetricsRepository):
 
     @contextmanager
     def _get_connection(self):
-        """Context manager dla połączenia"""
+        """Context manager for a connection"""
         if self._pool is None:
             self._initialize_pool()
 
@@ -182,7 +228,7 @@ class PostgresMetricsRepository(IMetricsRepository):
                 self._pool.putconn(conn)
 
     def initialize_schema(self) -> bool:
-        """Implementacja: inicjalizacja schematu"""
+        """Implementation: initialize the schema"""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -194,7 +240,7 @@ class PostgresMetricsRepository(IMetricsRepository):
             return False
 
     def test_connection(self) -> bool:
-        """Implementacja: test połączenia"""
+        """Implementation: test the connection"""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -207,7 +253,7 @@ class PostgresMetricsRepository(IMetricsRepository):
             return False
 
     def insert_retrieval_metrics(self, metrics: RetrievalMetrics) -> Optional[int]:
-        """Implementacja: wstaw metryki retrieval"""
+        """Implementation: insert retrieval metrics"""
         query = """
                 INSERT INTO rag_retrieval_metrics
                 (query, collection_name, num_results, top_scores, avg_score,
@@ -233,7 +279,7 @@ class PostgresMetricsRepository(IMetricsRepository):
             metrics: GenerationMetrics,
             retrieval_id: Optional[int] = None
     ) -> Optional[int]:
-        """Implementacja: wstaw metryki generation"""
+        """Implementation: insert generation metrics"""
         query = """
                 INSERT INTO rag_generation_metrics
                 (retrieval_id, query, answer, context_length, tokens_used,
@@ -256,22 +302,27 @@ class PostgresMetricsRepository(IMetricsRepository):
             return None
 
     def insert_full_metrics(self, metrics: FullRAGMetrics) -> Optional[int]:
-        """Implementacja: wstaw pełne metryki"""
+        """
+        Implementation: insert full metrics.
+        If metrics.retrieval_id / metrics.generation_id are set,
+        we link the existing rows instead of creating duplicates.
+        """
         try:
-            # Najpierw retrieval
-            retrieval_id = self.insert_retrieval_metrics(metrics.retrieval)
+            # Retrieval: link to an existing row OR a new one
+            retrieval_id = getattr(metrics, "retrieval_id", None) \
+                or self.insert_retrieval_metrics(metrics.retrieval)
             if not retrieval_id:
                 return None
 
-            # Potem generation (jeśli istnieje)
-            generation_id = None
-            if metrics.generation:
+            # Generation: link OR new (if present)
+            generation_id = getattr(metrics, "generation_id", None)
+            if generation_id is None and metrics.generation:
                 generation_id = self.insert_generation_metrics(
                     metrics.generation,
                     retrieval_id
                 )
 
-            # Na koniec full metrics
+            # Finally, the full metrics
             query = """
                     INSERT INTO rag_full_metrics
                         (retrieval_id, generation_id, total_latency_ms, timestamp)
@@ -298,7 +349,7 @@ class PostgresMetricsRepository(IMetricsRepository):
             collection_name: Optional[str] = None,
             hours: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """Implementacja: pobierz metryki retrieval"""
+        """Implementation: get retrieval metrics"""
         query = """
                 SELECT id, \
                        query, \
@@ -341,7 +392,7 @@ class PostgresMetricsRepository(IMetricsRepository):
             hours: Optional[int] = 24,
             collection_name: Optional[str] = None
     ) -> MetricsStats:
-        """Implementacja: pobierz statystyki"""
+        """Implementation: get statistics"""
         query = """
                 SELECT COUNT(*)        as   total_queries, \
                        AVG(latency_ms) as   avg_latency, \
@@ -405,8 +456,83 @@ class PostgresMetricsRepository(IMetricsRepository):
                 queries_no_results=0
             )
 
+    def insert_chunking_metrics(self, metrics: ChunkingRunMetrics) -> Optional[int]:
+        """Implementation: insert chunking metrics"""
+        query = """
+                INSERT INTO rag_chunking_metrics
+                (experiment_id, strategy, source, category,
+                 chunk_size, chunk_overlap, batch_size, force_refresh,
+                 embedding_model, llm_model, python_version,
+                 num_chunks, avg_chunk_len, max_chunk_len,
+                 empty_chunks, too_short_chunks,
+                 over_limit_chunks, over_limit_ratio, coverage, coherence,
+                 embedding_http_requests, texts_embedded, llm_calls, fallbacks,
+                 chunking_ms, embedding_ms, storage_ms, total_ms, timestamp)
+                VALUES (%(experiment_id)s, %(strategy)s, %(source)s, %(category)s,
+                        %(chunk_size)s, %(chunk_overlap)s, %(batch_size)s, %(force_refresh)s,
+                        %(embedding_model)s, %(llm_model)s, %(python_version)s,
+                        %(num_chunks)s, %(avg_chunk_len)s, %(max_chunk_len)s,
+                        %(empty_chunks)s, %(too_short_chunks)s,
+                        %(over_limit_chunks)s, %(over_limit_ratio)s, %(coverage)s, %(coherence)s,
+                        %(embedding_http_requests)s, %(texts_embedded)s, %(llm_calls)s, %(fallbacks)s,
+                        %(chunking_ms)s, %(embedding_ms)s, %(storage_ms)s, %(total_ms)s,
+                        %(timestamp)s) RETURNING id;
+                """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, metrics.to_dict())
+                    record_id = cursor.fetchone()[0]
+                    logger.debug(f"Metryki chunkingu zapisane: ID={record_id}")
+                    return record_id
+        except Error as e:
+            logger.error(f"Błąd zapisu metryk chunkingu: {e}")
+            return None
+
+    def get_chunking_metrics(
+            self,
+            limit: int = 100,
+            experiment_id: Optional[str] = None,
+            strategy: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Implementation: get chunking metrics"""
+        query = """
+                SELECT id, experiment_id, strategy, source, category,
+                       chunk_size, chunk_overlap, batch_size, force_refresh,
+                       embedding_model, llm_model, python_version,
+                       num_chunks, avg_chunk_len, max_chunk_len,
+                       empty_chunks, too_short_chunks,
+                       over_limit_chunks, over_limit_ratio, coverage, coherence,
+                       embedding_http_requests, texts_embedded, llm_calls, fallbacks,
+                       chunking_ms, embedding_ms, storage_ms, total_ms, timestamp
+                FROM rag_chunking_metrics
+                WHERE 1=1
+                """
+        params: List[Any] = []
+
+        if experiment_id:
+            query += " AND experiment_id = %s"
+            params.append(experiment_id)
+
+        if strategy:
+            query += " AND strategy = %s"
+            params.append(strategy)
+
+        query += " ORDER BY timestamp DESC LIMIT %s"
+        params.append(limit)
+
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute(query, params)
+                    results = cursor.fetchall()
+                    return [dict(row) for row in results]
+        except Error as e:
+            logger.error(f"Błąd odczytu metryk chunkingu: {e}")
+            return []
+
     def close(self) -> None:
-        """Implementacja: zamknij połączenia"""
+        """Implementation: close connections"""
         if self._pool:
             self._pool.closeall()
             logger.info("PostgreSQL pool zamknięty")

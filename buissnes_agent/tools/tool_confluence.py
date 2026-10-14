@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def _get_confluence_client():
-    """Pomocnicza funkcja do autoryzacji w Atlassian Cloud"""
+    """Helper function for Atlassian Cloud authentication"""
     url = os.getenv("CONFLUENCE_URL")
     username = os.getenv("CONFLUENCE_USERNAME")
     token = os.getenv("CONFLUENCE_API_TOKEN")
@@ -18,17 +18,17 @@ def _get_confluence_client():
     return Confluence(
         url=url,
         username=username,
-        password=token,  # W chmurze token API podajemy jako hasło
+        password=token,  # In the cloud we pass the API token as the password
         cloud=True
     )
 
 
 def run_confluence_search(query: str) -> str:
     """
-    ### WYSZUKIWANIE W CONFLUENCE (Wewnętrzna Baza Wiedzy)
+    ### SEARCHING IN CONFLUENCE (Internal Knowledge Base)
 
-    Używa CQL (Confluence Query Language) do znalezienia stron,
-    a następnie BeautifulSoup do wyczyszczenia HTML z treści.
+    Uses CQL (Confluence Query Language) to find pages,
+    then BeautifulSoup to clean the HTML content.
     """
     print(f"[Confluence] Szukam: '{query}'", file=sys.stderr)
 
@@ -37,12 +37,12 @@ def run_confluence_search(query: str) -> str:
         return "Błąd konfiguracji: Brak zmiennych CONFLUENCE_* w pliku .env."
 
     try:
-        # 1. Budowanie zapytania CQL
-        # title ~ "x" OR text ~ "x" -> szukaj w tytule lub w treści
-        # type = "page" -> ignoruj załączniki, komentarze i blogposty
+        # 1. Build the CQL query
+        # title ~ "x" OR text ~ "x" -> search in the title or in the content
+        # type = "page" -> ignore attachments, comments and blogposts
         cql = f'(title ~ "{query}" OR text ~ "{query}") AND type = "page"'
 
-        # Pobieramy max 3 wyniki, żeby nie zaśmiecić kontekstu
+        # Fetch at most 3 results so we don't pollute the context
         results = confluence.cql(cql, limit=3)
 
         if not results.get("results"):
@@ -50,27 +50,27 @@ def run_confluence_search(query: str) -> str:
 
         final_output = []
 
-        # 2. Iteracja po wynikach i pobieranie treści
+        # 2. Iterate over the results and fetch the content
         for page in results["results"]:
             page_id = page["content"]["id"]
             page_title = page["content"]["title"]
 
-            # Konstrukcja linku do strony (dla użytkownika)
+            # Build the link to the page (for the user)
             base_url = os.getenv('CONFLUENCE_URL')
             webui = page['content']['_links']['webui']
-            # Czasem webui zawiera już /wiki, czasem nie - normalizacja:
+            # Sometimes webui already contains /wiki, sometimes not - normalization:
             page_url = f"{base_url}/wiki{webui}" if not webui.startswith('/wiki') else f"{base_url}{webui}"
 
-            # Pobranie pełnej treści (body.storage = format HTML Confluence'a)
+            # Fetch the full content (body.storage = Confluence's HTML format)
             full_page = confluence.get_page_by_id(page_id, expand='body.storage')
             raw_html = full_page['body']['storage']['value']
 
             # 3. HTML Parsing & Cleaning
-            # LLM czysty tekst niż <div><span>...
+            # The LLM prefers clean text over <div><span>...
             soup = BeautifulSoup(raw_html, "html.parser")
             text_content = soup.get_text(separator="\n").strip()
 
-            # Ograniczenie długości per strona
+            # Length limit per page
             max_chars = int(os.getenv("CONFLUENCE_MAX_CHARS", 2000))
             if len(text_content) > max_chars:
                 text_content = text_content[:max_chars] + "\n...(ucięto resztę strony)..."

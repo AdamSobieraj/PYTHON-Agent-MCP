@@ -14,7 +14,7 @@ class QdrantDatabaseStore:
         self._ensure_collection()
 
     def _ensure_collection(self):
-        """Tworzy kolekcję tylko jeśli nie istnieje."""
+        """Creates the collection only if it does not exist."""
         try:
             if not self.client.collection_exists(self.collection_name):
                 logger.info(f"Tworzenie kolekcji: {self.collection_name} (dim: {self.vector_size})")
@@ -29,7 +29,7 @@ class QdrantDatabaseStore:
             raise
 
     def count(self) -> int:
-        """Zwraca liczbę wektorów w kolekcji."""
+        """Returns the number of vectors in the collection."""
         try:
             return self.client.count(collection_name=self.collection_name).count
         except Exception:
@@ -37,8 +37,8 @@ class QdrantDatabaseStore:
 
     def insert_batch(self, items: List[Dict[str, Any]]):
         """
-        Wstawia paczkę dokumentów do Qdrant.
-        Obsługuje konwersję ID (Hash -> UUID) oraz mapowanie Phrase.
+        Inserts a batch of documents into Qdrant.
+        Handles ID conversion (Hash -> UUID) and Phrase mapping.
         """
         if not items:
             return
@@ -49,25 +49,25 @@ class QdrantDatabaseStore:
             metadata = item["metadata"]
             raw_id = metadata.get("phrase_metadata_id")
 
-            # 1. Walidacja i formatowanie ID (Qdrant wymaga UUID z myślnikami lub int)
+            # 1. ID validation and formatting (Qdrant requires a hyphenated UUID or an int)
             point_id = str(uuid.uuid4())  # Fallback
             if raw_id:
                 try:
-                    # Jeśli ID to 32-znakowy hash MD5, zamieniamy go na format UUID (8-4-4-4-12)
+                    # If the ID is a 32-character MD5 hash, convert it to UUID format (8-4-4-4-12)
                     point_id = str(uuid.UUID(hex=raw_id))
                 except ValueError:
-                    # Jeśli to nie hex, zostawiamy jak jest (o ile to string) lub generujemy nowy
+                    # If it is not hex, keep it as is (if it is a string) or generate a new one
                     logger.warning(f"Nieprawidłowy format ID '{raw_id}', generuję nowy UUID.")
                     pass
 
-            # 2. Przygotowanie Payloadu (Płaska struktura)
+            # 2. Prepare the Payload (flat structure)
             payload = metadata.copy()
 
-            # Gwarancja istnienia klucza 'phrase' (treść)
+            # Ensure the 'phrase' key (content) exists
             if "phrase" not in payload:
                 payload["phrase"] = item.get("text", "")
 
-            # 3. Tworzenie punktu
+            # 3. Create the point
             points.append(PointStruct(
                 id=point_id,
                 vector=item["vector"],
@@ -82,8 +82,8 @@ class QdrantDatabaseStore:
 
     def search(self, query_vector: List[float], limit: int = 5) -> List[Dict]:
         """
-        Wyszukuje podobne wektory i zwraca zmapowane wyniki.
-        Zaktualizowano do obsługi nowego schematu ('phrase' i 'metadata').
+        Searches for similar vectors and returns the mapped results.
+        Updated to support the new schema ('phrase' and 'metadata').
         """
         try:
             results = self.client.search(
@@ -97,13 +97,13 @@ class QdrantDatabaseStore:
             for p in results:
                 payload = p.payload or {}
 
-                # Pobieramy treść (phrase ma priorytet nad text)
+                # Fetch the content (phrase takes priority over text)
                 content = payload.get("phrase") or payload.get("text") or ""
 
-                # Zwracamy spójną strukturę
+                # Return a consistent structure
                 output.append({
-                    "text": content,  # Dla kompatybilności wstecznej
-                    "metadata": payload,  # Pełne metadane (source, title, etc.)
+                    "text": content,  # For backward compatibility
+                    "metadata": payload,  # Full metadata (source, title, etc.)
                     "score": p.score
                 })
 

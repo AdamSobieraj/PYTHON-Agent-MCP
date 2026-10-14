@@ -5,7 +5,6 @@ langchain-core
 langchain-openai
 langchain-qdrant
 langchain-text-splitters
-langchain-experimental
 langchain-community
 qdrant-client
 python-dotenv
@@ -14,5 +13,6 @@ pypdf
 pandas
 openpyxl
 python-docx
+psycopg2-binary
 tiktoken
 scipy

@@ -46,7 +46,7 @@ class DataLoaderLocalFileLoader:
                 "LocalFileLoader: Reading directly from markdown directory: '%s'",
                 self.markdown_directory
             )
-        else:
+        elif os.path.isdir(self.directory + "_markdown"):
             self.markdown_directory = self.directory + "_markdown"
             logger.info(
                 "LocalFileLoader: Source directory '%s' -> "
@@ -54,8 +54,18 @@ class DataLoaderLocalFileLoader:
                 self.directory,
                 self.markdown_directory
             )
-
-        if not os.path.exists(self.markdown_directory):
+        elif os.path.isdir(self.directory):
+            # Fallback: no _markdown sibling (e.g. research dataset) -
+            # read the given directory as-is
+            self.markdown_directory = self.directory
+            logger.info(
+                "LocalFileLoader: '%s_markdown' not found; "
+                "reading directory directly: '%s'",
+                self.directory,
+                self.markdown_directory
+            )
+        else:
+            self.markdown_directory = self.directory + "_markdown"
             logger.warning(
                 "LocalFileLoader: Markdown directory does not exist: '%s'. "
                 "Has Project 1 been run yet?",

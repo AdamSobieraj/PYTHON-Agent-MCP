@@ -1,46 +1,52 @@
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any
-from .models import RetrievalMetrics, GenerationMetrics, FullRAGMetrics, MetricsStats
+from .models import (
+    RetrievalMetrics,
+    GenerationMetrics,
+    FullRAGMetrics,
+    ChunkingRunMetrics,
+    MetricsStats
+)
 
 
 class IMetricsRepository(ABC):
     """
-    Interfejs dla wszystkich implementacji storage metryk.
+    Interface for all metrics storage implementations.
 
-    Każda baza danych (PostgreSQL, MySQL, MongoDB, File, etc.)
-    musi implementować wszystkie te metody.
+    Every database (PostgreSQL, MySQL, MongoDB, File, etc.)
+    must implement all of these methods.
     """
 
     @abstractmethod
     def initialize_schema(self) -> bool:
         """
-        Inicjalizacja schematu bazy (tworzenie tabel/kolekcji)
+        Initialize the database schema (create tables/collections)
 
         Returns:
-            bool: True jeśli sukces, False w przypadku błędu
+            bool: True on success, False on error
         """
         pass
 
     @abstractmethod
     def test_connection(self) -> bool:
         """
-        Test połączenia z bazą
+        Test the database connection
 
         Returns:
-            bool: True jeśli połączenie działa
+            bool: True if the connection works
         """
         pass
 
     @abstractmethod
     def insert_retrieval_metrics(self, metrics: RetrievalMetrics) -> Optional[int]:
         """
-        Wstaw metryki retrieval
+        Insert retrieval metrics
 
         Args:
-            metrics: Obiekt RetrievalMetrics
+            metrics: RetrievalMetrics object
 
         Returns:
-            Optional[int]: ID wstawionego rekordu lub None
+            Optional[int]: ID of the inserted record or None
         """
         pass
 
@@ -51,14 +57,14 @@ class IMetricsRepository(ABC):
             retrieval_id: Optional[int] = None
     ) -> Optional[int]:
         """
-        Wstaw metryki generation
+        Insert generation metrics
 
         Args:
-            metrics: Obiekt GenerationMetrics
-            retrieval_id: ID powiązanego retrieval (opcjonalne)
+            metrics: GenerationMetrics object
+            retrieval_id: ID of the related retrieval (optional)
 
         Returns:
-            Optional[int]: ID wstawionego rekordu lub None
+            Optional[int]: ID of the inserted record or None
         """
         pass
 
@@ -68,13 +74,13 @@ class IMetricsRepository(ABC):
             metrics: FullRAGMetrics
     ) -> Optional[int]:
         """
-        Wstaw pełne metryki RAG pipeline
+        Insert full RAG pipeline metrics
 
         Args:
-            metrics: Obiekt FullRAGMetrics
+            metrics: FullRAGMetrics object
 
         Returns:
-            Optional[int]: ID wstawionego rekordu lub None
+            Optional[int]: ID of the inserted record or None
         """
         pass
 
@@ -86,15 +92,15 @@ class IMetricsRepository(ABC):
             hours: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
-        Pobierz metryki retrieval
+        Get retrieval metrics
 
         Args:
-            limit: Maksymalna liczba rekordów
-            collection_name: Filtruj po kolekcji (opcjonalnie)
-            hours: Pobierz tylko z ostatnich N godzin (opcjonalnie)
+            limit: Maximum number of records
+            collection_name: Filter by collection (optional)
+            hours: Get only the last N hours (optional)
 
         Returns:
-            List[Dict]: Lista metryk jako słowniki
+            List[Dict]: List of metrics as dictionaries
         """
         pass
 
@@ -105,18 +111,51 @@ class IMetricsRepository(ABC):
             collection_name: Optional[str] = None
     ) -> MetricsStats:
         """
-        Pobierz zagregowane statystyki
+        Get aggregated statistics
 
         Args:
-            hours: Zakres czasowy w godzinach
-            collection_name: Filtruj po kolekcji (opcjonalnie)
+            hours: Time range in hours
+            collection_name: Filter by collection (optional)
 
         Returns:
-            MetricsStats: Obiekt ze statystykami
+            MetricsStats: Object with the statistics
+        """
+        pass
+
+    @abstractmethod
+    def insert_chunking_metrics(self, metrics: ChunkingRunMetrics) -> Optional[int]:
+        """
+        Insert chunking metrics (experiments E1-E4)
+
+        Args:
+            metrics: ChunkingRunMetrics object
+
+        Returns:
+            Optional[int]: ID of the inserted record or None
+        """
+        pass
+
+    @abstractmethod
+    def get_chunking_metrics(
+            self,
+            limit: int = 100,
+            experiment_id: Optional[str] = None,
+            strategy: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get chunking metrics
+
+        Args:
+            limit: Maximum number of records
+            experiment_id: Filter by experiment (optional)
+            strategy: Filter by strategy (optional)
+
+        Returns:
+            List[Dict]: List of metrics as dictionaries
         """
         pass
 
     @abstractmethod
     def close(self) -> None:
-        """Zamknij połączenia z bazą"""
+        """Close database connections"""
         pass

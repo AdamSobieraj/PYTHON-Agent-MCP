@@ -1,21 +1,17 @@
 import hashlib
 import logging
 import sys
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from buissnes_agent.textchunker.langchain.base import ChunkingStrategy
 from .strategies import (
-    MarkdownHeaderStrategy,
     NewAgenticStrategy,
     NewFixedSizeStrategy,
     NewSemanticStrategy,
     NewSentenceBasedStrategy,
-    RecursiveStrategy,
-    UnstructuredStrategy,
-    SemanticStrategy
 )
 from ...MetadataModels import ChunkMetadata
 
@@ -40,10 +36,15 @@ class LangChainChunker:
     in separate files), but "how to manage the splitting process".
     """
 
-    def __init__(self, chunk_strategy: str, chunk_size: int, chunk_overlap: int):
+    def __init__(self, chunk_strategy: str, chunk_size: int, chunk_overlap: int,
+                 embedding_client=None):
         self.chunk_strategy = chunk_strategy
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        # Shared embeddings client (cost counters in one place)
+        self.embedding_client = embedding_client
+        # The strategy created by the last process_content() call
+        self.last_strategy: Optional[ChunkingStrategy] = None
 
         logger.info(
             "LangChainChunker initialized. Strategy: %s, Max Chunk Size: %d",
@@ -55,32 +56,40 @@ class LangChainChunker:
         """
         Factory Method.
         Maps strategy name (string) to a concrete strategy class instance.
+
+        Primary names are the configuration names used in the research
+        setup; "new*Strategy" names are kept as synonyms.
         """
-        if self.chunk_strategy == "markdownHeaderTextSplitter":
-            return MarkdownHeaderStrategy()
-        elif self.chunk_strategy == "unstructuredMarkdownLoaderSingle":
-            return UnstructuredStrategy(mode="single")
-        elif self.chunk_strategy == "unstructuredMarkdownLoaderElements":
-            return UnstructuredStrategy(mode="elements")
-        elif self.chunk_strategy == "semanticChunker":
-            return SemanticStrategy()
-        elif self.chunk_strategy == "recursive":
-            return RecursiveStrategy(self.chunk_size, self.chunk_overlap)
-        elif self.chunk_strategy == "newFixedSizeStrategy":
-            return NewFixedSizeStrategy(self.chunk_size, self.chunk_overlap)
-        elif self.chunk_strategy == "newSentenceBasedStrategy":
-            return NewSentenceBasedStrategy(self.chunk_size, self.chunk_overlap)
-        elif self.chunk_strategy == "newSemanticStrategy":
-            return NewSemanticStrategy(self.chunk_size, self.chunk_overlap)
-        elif self.chunk_strategy == "newAgenticStrategy":
-            return NewAgenticStrategy(self.chunk_size, self.chunk_overlap)
-        else:
-            # Fallback - if strategy unknown, use safe recursive
-            logger.warning(
-                "Unknown strategy '%s', utilizing recursive fallback.",
-                self.chunk_strategy
+        strategies = {
+            "fixedSize":
+                lambda: NewFixedSizeStrategy(self.chunk_size, self.chunk_overlap),
+            "sentenceBased":
+                lambda: NewSentenceBasedStrategy(self.chunk_size, self.chunk_overlap),
+            "semanticChunker":
+                lambda: NewSemanticStrategy(
+                    self.chunk_size, self.chunk_overlap,
+                    embeddings=self.embedding_client
+                ),
+            "agentic":
+                lambda: NewAgenticStrategy(self.chunk_size, self.chunk_overlap),
+        }
+
+        # Synonyms (previous names in the code)
+        aliases = {
+            "newFixedSizeStrategy": "fixedSize",
+            "newSentenceBasedStrategy": "sentenceBased",
+            "newSemanticStrategy": "semanticChunker",
+            "newAgenticStrategy": "agentic",
+        }
+
+        name = aliases.get(self.chunk_strategy, self.chunk_strategy)
+        factory = strategies.get(name)
+        if factory is None:
+            raise ValueError(
+                f"Unknown chunking strategy '{self.chunk_strategy}'. "
+                f"Valid strategies: {', '.join(sorted(list(strategies) + list(aliases)))}"
             )
-            return RecursiveStrategy(self.chunk_size, self.chunk_overlap)
+        return factory()
 
     # =========================================================================
     # METHOD: process_content (Unified entry point)
@@ -106,6 +115,7 @@ class LangChainChunker:
 
         # Step 1: Select strategy and execute split (Primary Split)
         strategy = self._get_strategy()
+        self.last_strategy = strategy  # exposed for cost-counter access
         splits: List[Document] = strategy.split_documents(documents)
 
         # Step 2: Smart Metadata Cleanup

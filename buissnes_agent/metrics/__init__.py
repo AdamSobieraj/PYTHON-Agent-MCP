@@ -2,6 +2,7 @@ from .models import (
     RetrievalMetrics,
     GenerationMetrics,
     FullRAGMetrics,
+    ChunkingRunMetrics,
     MetricsStats
 )
 
@@ -10,12 +11,12 @@ from .repository_factory import MetricsRepositoryFactory
 
 # Convenience functions
 def get_repository(storage_type: str = None) -> IMetricsRepository:
-    """Pobierz repository (singleton)"""
+    """Get the repository (singleton)"""
     return MetricsRepositoryFactory.get_singleton(storage_type)
 
 
 def create_repository(storage_type: str = None, **kwargs) -> IMetricsRepository:
-    """Utwórz nową instancję repository"""
+    """Create a new repository instance"""
     return MetricsRepositoryFactory.create(storage_type, **kwargs)
 
 
@@ -23,6 +24,7 @@ __all__ = [
     "RetrievalMetrics",
     "GenerationMetrics",
     "FullRAGMetrics",
+    "ChunkingRunMetrics",
     "MetricsStats",
     "IMetricsRepository",
     "MetricsRepositoryFactory",

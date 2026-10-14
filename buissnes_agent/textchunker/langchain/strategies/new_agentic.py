@@ -55,6 +55,10 @@ class NewAgenticStrategy(ChunkingStrategy):
         self.max_sentences_per_request = max_sentences_per_request
         self.temperature = temperature
 
+        # Cost counters (E2/E4 metrics)
+        self.llm_calls = 0
+        self.fallbacks = 0
+
         # Initialize the LLM client (model is configured in .env)
         try:
             base_url = os.getenv("CHAT_BASE_URL")
@@ -77,6 +81,11 @@ class NewAgenticStrategy(ChunkingStrategy):
 
         # Reused: sentence detection
         self._sentence_strategy = NewSentenceBasedStrategy(chunk_size, chunk_overlap)
+
+    def reset_counters(self) -> None:
+        """Reset cost counters (call between documents / experiments)."""
+        self.llm_calls = 0
+        self.fallbacks = 0
 
     # ------------------------------------------------------------------
     # INTERFACE (ChunkingStrategy)
@@ -131,6 +140,7 @@ class NewAgenticStrategy(ChunkingStrategy):
 
     def _groups_for_window(self, window: List[str]) -> List[List[str]]:
         """Asks the LLM for a sentence partition of the window (with fallback)."""
+        self.llm_calls += 1
         try:
             response = self.llm.invoke(self._build_prompt(window))
             content = response.content if hasattr(response, "content") else str(response)
@@ -138,11 +148,13 @@ class NewAgenticStrategy(ChunkingStrategy):
             numbers = self._validate_partition(parsed, len(window))
             if numbers is not None:
                 return [[window[i - 1] for i in nums] for nums in numbers]
+            self.fallbacks += 1
             logger.warning(
                 "NewAgenticStrategy: LLM returned an invalid partition; "
                 "falling back to sentence packing for %d sentence(s).", len(window)
             )
         except Exception as e:
+            self.fallbacks += 1
             logger.warning(
                 "NewAgenticStrategy: LLM call failed (%s); "
                 "falling back to sentence packing for %d sentence(s).", e, len(window)

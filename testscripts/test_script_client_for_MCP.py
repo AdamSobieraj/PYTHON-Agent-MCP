@@ -1,6 +1,9 @@
 import asyncio
 import os
+import sys
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -10,20 +13,33 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
 
-# Biblioteki MCP
+# MCP libraries
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamablehttp_client
 
-# Pobieramy katalog, w którym fizycznie znajduje się skrypt
+# Get the directory where the script is physically located
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 load_dotenv()
 
-# Definiujemy pełną ścieżkę do serwera
+# Define the full path to the server
 SERVER_SCRIPT_PATH = os.path.join(BASE_DIR, "../buissnes_agent/MCPServer.py")
 
-# Pobieranie zmiennych LLM
+# Generation metrics (write to rag_generation_metrics)
+_PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, ".."))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+try:
+    from buissnes_agent.metrics import GenerationMetrics
+    from buissnes_agent.tools.rag_metrics import metrics_collector
+except ImportError:
+    GenerationMetrics = None  # type: ignore
+    metrics_collector = None  # type: ignore
+
+# Getting LLM variables
 LLM_BASE_URL = os.getenv("CHAT_BASE_URL")
 LLM_API_KEY = os.getenv("CHAT_API_KEY")
 LLM_MODEL = os.getenv("CHAT_MODEL")
@@ -103,45 +119,58 @@ KROK 3: ODPOWIEDŹ
 
 
 # ==============================================================================
-# SCHEMATY ARGUMENTÓW NARZĘDZI
+# TOOL ARGUMENT SCHEMAS
 # ==============================================================================
 
 class QueryKnowledgeBaseArgs(BaseModel):
-    """Argumenty dla query_knowledge_base."""
-    query: str = Field(description="Pytanie użytkownika")
-    collection_name: str = Field(description="Nazwa kolekcji w Qdrant")
-    top_k: int | None = Field(default=None, description="Liczba wyników (opcjonalne)")
+    """Arguments for query_knowledge_base."""
+    query: str = Field(description="User query")
+    collection_name: str = Field(description="Collection name in Qdrant")
+    top_k: int | None = Field(default=None, description="Number of results (optional)")
 
 
 class GetS3DocumentArgs(BaseModel):
-    """Argumenty dla get_s3_markdown_document."""
-    s3_uri: str = Field(description="Ścieżka S3, np. s3://bucket/path/file.md")
+    """Arguments for get_s3_markdown_document."""
+    s3_uri: str = Field(description="S3 path, e.g. s3://bucket/path/file.md")
 
 
 class GetS3DocumentRangeArgs(BaseModel):
-    """Argumenty dla get_s3_markdown_document_range."""
-    s3_uri: str = Field(description="Ścieżka S3")
-    start_byte: int = Field(description="Początkowy bajt")
-    end_byte: int | None = Field(default=None, description="Końcowy bajt (opcjonalny)")
+    """Arguments for get_s3_markdown_document_range."""
+    s3_uri: str = Field(description="S3 path")
+    start_byte: int = Field(description="Starting byte")
+    end_byte: int | None = Field(default=None, description="End byte (optional)")
 
 
 # ==============================================================================
-# MENEDŻER SESJI (A2A PATTERN)
+# SESSION MANAGER (A2A PATTERN)
 # ==============================================================================
 @asynccontextmanager
 async def init_session(transport: str, host: str = "localhost", port: int = 8000):
     """
-    Zarządza sesją Klienta MCP.
+    Manages the MCP client session.
 
-    Obsługuje dwa tryby transportu:
-    1. 'sse' (Server-Sent Events) - dla komunikacji sieciowej (jak w przykładzie A2A).
-    2. 'stdio' (Standard I/O) - dla lokalnego uruchamiania podprocesu (jak w Twoim pierwotnym kodzie).
+    Supports three transport modes:
+    1. 'http' (Streamable HTTP) - the server's /mcp endpoint (server: --transport http).
+    2. 'sse' (Server-Sent Events) - the server's /sse endpoint (server: --transport sse).
+    3. 'stdio' (Standard I/O) - the server as a local subprocess (server: --transport stdio).
 
     Yields:
-        ClientSession: Zainicjalizowana sesja gotowa do wywoływania narzędzi.
+        ClientSession: Initialized session ready to call tools.
     """
-    if transport == 'sse':
-        # Tryb sieciowy - łączy się do działającego serwera HTTP
+    if transport == 'http':
+        # Network mode - streamable HTTP (modern MCP mode)
+        url = f'http://{host}:{port}/mcp'
+        print(f"[Client A2A] Łączenie w trybie HTTP (streamable) do: {url}")
+
+        async with streamablehttp_client(url) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream=read_stream, write_stream=write_stream) as session:
+                print("[Client A2A] Sesja HTTP utworzona. Inicjalizacja...")
+                await session.initialize()
+                print("[Client A2A] Sesja HTTP gotowa.")
+                yield session
+
+    elif transport == 'sse':
+        # Network mode - connects to a running HTTP server
         url = f'http://{host}:{port}/sse'
         print(f"[Client A2A] Łączenie w trybie SSE do: {url}")
 
@@ -153,17 +182,19 @@ async def init_session(transport: str, host: str = "localhost", port: int = 8000
                 yield session
 
     elif transport == 'stdio':
-        # Tryb lokalny - uruchamia skrypt serwera jako podproces
+        # Local mode - starts the server script as a subprocess
         print(f"[Client A2A] Uruchamianie serwera lokalnego (STDIO): {SERVER_SCRIPT_PATH}")
 
         if not os.path.exists(SERVER_SCRIPT_PATH):
             raise FileNotFoundError(f"Nie znaleziono pliku serwera: {SERVER_SCRIPT_PATH}")
 
-        # Ważne: Przekazujemy zmienne środowiskowe do serwera (klucze API itp.)
+        # Important: pass environment variables to the server (API keys, etc.)
         server_env = os.environ.copy()
 
+        # sys.executable - the interpreter this script is running with
+        # (guarantees the server gets the same environment/venv with the dependencies)
         server_params = StdioServerParameters(
-            command="python",
+            command=sys.executable,
             args=[SERVER_SCRIPT_PATH],
             env=server_env
         )
@@ -175,20 +206,43 @@ async def init_session(transport: str, host: str = "localhost", port: int = 8000
                 print("[Client A2A] Sesja STDIO gotowa.")
                 yield session
     else:
-        raise ValueError(f"Nieobsługiwany transport: {transport}. Wybierz 'sse' lub 'stdio'.")
+        raise ValueError(f"Nieobsługiwany transport: {transport}. Wybierz 'http', 'sse' lub 'stdio'.")
 
 
 # ==============================================================================
-# GŁÓWNA PĘTLA CZATU
+# GENERATION METRICS (Stack A - agent in the client)
+# ==============================================================================
+def _log_generation_metrics(query: str, answer: str, context_chars: int,
+                            t0: float) -> None:
+    """
+    Best-effort save of the turn metrics (generation + full metrics) to the database.
+    Does not break the chat when metrics are unavailable.
+    """
+    if metrics_collector is None:
+        return
+    try:
+        from buissnes_agent.tools.rag_metrics import log_full_rag_for_turn
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        log_full_rag_for_turn(query, answer, context_chars, latency_ms)
+    except Exception as e:
+        print(f"[UWAGA] Nie zapisano metryk: {e}")
+
+
+# ==============================================================================
+# MAIN CHAT LOOP
 # ==============================================================================
 async def run_chat_loop():
     print(f"Katalog roboczy: {os.getcwd()}")
 
-    selected_transport = "sse"
+    # Must match the mode the server was started with:
+    #   python -m buissnes_agent.mcp_server --transport http  -> "http"
+    #   python -m buissnes_agent.mcp_server --transport sse   -> "sse"
+    #   (server as subprocess)                                -> "stdio"
+    selected_transport = "http"
 
     async with init_session(transport=selected_transport) as session:
 
-        # 1. Pobranie narzędzi z serwera MCP
+        # 1. Fetch tools from the MCP server
         try:
             mcp_tools = await session.list_tools()
             tool_names = [t.name for t in mcp_tools.tools]
@@ -197,8 +251,8 @@ async def run_chat_loop():
             print(f"Błąd pobierania narzędzi: {e}")
             return
 
-        # 2. Konwersja narzędzi MCP na format LangChain
-        # Mapowanie nazw narzędzi do schematów
+        # 2. Convert MCP tools to the LangChain format
+        # Mapping tool names to schemas
         tool_schemas = {
             'query_knowledge_base': QueryKnowledgeBaseArgs,
             'get_s3_markdown_document': GetS3DocumentArgs,
@@ -214,10 +268,10 @@ async def run_chat_loop():
                 print(f"[UWAGA] Brak schematu dla narzędzia: {tool.name}, pomijam")
                 continue
 
-            # FIX: Wrapper musi przechwytywać tool.name przez closure
+            # FIX: The wrapper must capture tool.name via closure
             def make_wrapper(current_tool_name):
                 async def _tool_wrapper(**kwargs):
-                    # FIX: LangChain owija argumenty w dodatkowy 'kwargs'
+                    # FIX: LangChain wraps arguments in an extra 'kwargs'
                     if len(kwargs) == 1 and 'kwargs' in kwargs:
                         actual_args = kwargs['kwargs']
                     else:
@@ -226,13 +280,16 @@ async def run_chat_loop():
                     print(f"\n[DEBUG A2A] Wywołuję narzędzie MCP: {current_tool_name} z args={actual_args}")
 
                     try:
-                        # Wywołanie przez sesję MCP
+                        # Call through the MCP session
                         result = await session.call_tool(current_tool_name, arguments=actual_args)
 
-                        # Obsługa błędów zwróconych przez narzędzie
+                        # Handle errors returned by the tool
                         if result.isError:
                             return f"Tool Error: {result.content}"
 
+                        # Generation metrics: length of the context gathered from the tools
+                        turn_state["chars"] = turn_state.get("chars", 0) + \
+                            len(result.content[0].text)
                         return result.content[0].text
 
                     except Exception as e:
@@ -243,7 +300,7 @@ async def run_chat_loop():
 
                 return _tool_wrapper
 
-            # Tworzymy StructuredTool dla LangChaina ze schematem
+            # Create a StructuredTool for LangChain with the schema
             lc_tool = StructuredTool.from_function(
                 func=None,
                 coroutine=make_wrapper(tool.name),
@@ -253,7 +310,7 @@ async def run_chat_loop():
             )
             langchain_tools.append(lc_tool)
 
-        # 3. Inicjalizacja LLM i Agenta (LangGraph)
+        # 3. Initialize the LLM and the agent (LangGraph)
         llm = ChatOpenAI(
             base_url=LLM_BASE_URL,
             api_key=LLM_API_KEY,
@@ -268,7 +325,7 @@ async def run_chat_loop():
             checkpointer=memory
         )
 
-        # 4. Interaktywna pętla
+        # 4. Interactive loop
         thread_id = "local-session-1"
         config = {"configurable": {"thread_id": thread_id}}
 
@@ -277,15 +334,22 @@ async def run_chat_loop():
         print("Zadaj pytanie o ISO20022.")
         print("=" * 50)
 
+        # State of the current turn (for generation metrics)
+        turn_state = {"chars": 0}
+
         while True:
             try:
                 user_input = input("\nTy: ")
                 if user_input.lower() in ["q", "exit", "quit"]:
                     break
 
+                # Start turn timing (question -> final answer)
+                turn_state["chars"] = 0
+                t0 = time.perf_counter()
+
                 print("Asystent myśli...", end="", flush=True)
 
-                # Przekazujemy Security Prompt w każdej iteracji
+                # Pass the Security Prompt on every iteration
                 messages_payload = [
                     SystemMessage(content=SECURITY_SYSTEM_PROMPT),
                     HumanMessage(content=user_input)
@@ -304,6 +368,15 @@ async def run_chat_loop():
                         elif last_msg.content:
                             print(f"\r\033[K", end="")
                             print(f"\nAsystent:\n{last_msg.content}")
+
+                            # Generation metrics: the final answer of the turn
+                            # (rag_generation_metrics)
+                            _log_generation_metrics(
+                                user_input,
+                                str(last_msg.content),
+                                turn_state.get("chars", 0),
+                                t0,
+                            )
 
             except KeyboardInterrupt:
                 print("\nPrzerwano.")

@@ -17,22 +17,22 @@ load_dotenv()
 
 
 # ==============================================================================
-# FORMATOWANIE I WYŚWIETLANIE
+# FORMATTING AND DISPLAY
 # ==============================================================================
 
 def print_separator(width: int = 70):
-    """Drukuj separator"""
+    """Print a separator"""
     print("=" * width)
 
 
 def print_section_header(title: str, width: int = 70):
-    """Drukuj nagłówek sekcji"""
+    """Print a section header"""
     print("\n" + title)
     print("-" * width)
 
 
 # ==============================================================================
-# DASHBOARD - GŁÓWNA ANALIZA
+# DASHBOARD - MAIN ANALYSIS
 # ==============================================================================
 
 def print_dashboard(
@@ -42,16 +42,16 @@ def print_dashboard(
         limit: int = 1000
 ):
     """
-    Wyświetl dashboard metryk RAG (niezależnie od typu bazy!)
+    Display the RAG metrics dashboard (independent of the database type!)
 
     Args:
-        repository: Instancja IMetricsRepository
-        hours: Zakres czasowy (None = wszystkie dane)
-        collection_name: Filtruj po kolekcji
-        limit: Max rekordów do analizy
+        repository: IMetricsRepository instance
+        hours: Time range (None = all data)
+        collection_name: Filter by collection
+        limit: Max records to analyze
     """
 
-    # Pobierz dane przez interfejs
+    # Fetch data through the interface
     try:
         stats = repository.get_aggregated_stats(
             hours=hours or 24,
@@ -71,7 +71,7 @@ def print_dashboard(
         logger.error(f"Error loading metrics: {e}")
         return
 
-    # Sprawdź czy są dane
+    # Check whether there is any data
     if stats.total_queries == 0:
         print_separator()
         print("BRAK DANYCH DO WYŚWIETLENIA")
@@ -82,13 +82,13 @@ def print_dashboard(
         print_separator()
         return
 
-    # ===== NAGŁÓWEK =====
+    # ===== HEADER =====
     print_separator()
     print("         RAG RETRIEVAL PERFORMANCE DASHBOARD")
     print(f"         Storage: {repository.__class__.__name__}")
     print_separator()
 
-    # ===== OGÓLNE STATYSTYKI =====
+    # ===== GENERAL STATISTICS =====
     print_section_header("OGÓLNE STATYSTYKI")
     print(f"   Total Queries:        {stats.total_queries}")
 
@@ -115,7 +115,7 @@ def print_dashboard(
     print(f"   Avg Top Score:     {stats.avg_score:.3f}")
     print(f"   Avg Results/Query: {stats.avg_results:.1f}")
 
-    # ===== PER COLLECTION (jeśli dostępne) =====
+    # ===== PER COLLECTION (if available) =====
     if stats.per_collection and not collection_name:
         print_section_header("PER COLLECTION")
         _print_collection_stats(stats.per_collection)
@@ -139,10 +139,10 @@ def print_dashboard(
 
 
 def _print_collection_stats(per_collection: Dict[str, Any]):
-    """Wydrukuj statystyki per collection"""
-    # Format zależy od tego jak repository zwraca dane
-    # Dla Postgres: zagnieżdżony dict
-    # Dla File: może być inaczej
+    """Print per-collection statistics"""
+    # The format depends on how the repository returns the data
+    # For Postgres: nested dict
+    # For File: it may be different
 
     if not per_collection:
         print("   Brak danych")
@@ -161,36 +161,36 @@ def _print_collection_stats(per_collection: Dict[str, Any]):
 
 
 def _generate_alerts(stats: MetricsStats, raw_metrics: List[Dict]) -> List[str]:
-    """Generuj alerty na podstawie metryk"""
+    """Generate alerts based on the metrics"""
     alerts = []
 
-    # Alert 1: Wolne zapytania
+    # Alert 1: Slow queries
     slow_queries = [m for m in raw_metrics if m.get('latency_ms', 0) > 2000]
     if slow_queries:
         alerts.append(
             f"   [WARNING] {len(slow_queries)} slow queries (>2000ms)"
         )
 
-    # Alert 2: Niska jakość wyników
+    # Alert 2: Low result quality
     low_quality = [m for m in raw_metrics if m.get('avg_score', 1) < 0.5]
     if low_quality:
         alerts.append(
             f"   [WARNING] {len(low_quality)} low quality queries (score <0.5)"
         )
 
-    # Alert 3: Brak wyników
+    # Alert 3: No results
     if stats.queries_no_results > 0:
         alerts.append(
             f"   [INFO] {stats.queries_no_results} queries returned no results"
         )
 
-    # Alert 4: Bardzo wysoki P99
+    # Alert 4: Very high P99
     if stats.p99_latency_ms > 5000:
         alerts.append(
             f"   [WARNING] Very high P99 latency ({stats.p99_latency_ms:.0f}ms)"
         )
 
-    # Alert 5: Niska średnia score
+    # Alert 5: Low average score
     if stats.avg_score < 0.6:
         alerts.append(
             f"   [WARNING] Low average score ({stats.avg_score:.3f})"
@@ -200,8 +200,8 @@ def _generate_alerts(stats: MetricsStats, raw_metrics: List[Dict]) -> List[str]:
 
 
 def _print_slowest_queries(raw_metrics: List[Dict], top_n: int = 5):
-    """Wydrukuj N najwolniejszych zapytań"""
-    # Sortuj po latency
+    """Print the N slowest queries"""
+    # Sort by latency
     sorted_metrics = sorted(
         raw_metrics,
         key=lambda x: x.get('latency_ms', 0),
@@ -218,7 +218,7 @@ def _print_slowest_queries(raw_metrics: List[Dict], top_n: int = 5):
 
 
 # ==============================================================================
-# EKSPORT DO CSV/JSON
+# EXPORT TO CSV/JSON
 # ==============================================================================
 
 def export_to_csv(
@@ -229,14 +229,14 @@ def export_to_csv(
         limit: int = 10000
 ):
     """
-    Eksportuj metryki do CSV
+    Export metrics to CSV
 
     Args:
-        repository: Instancja repository
-        output_file: Ścieżka do pliku wyjściowego
-        hours: Filtruj po czasie
-        collection_name: Filtruj po kolekcji
-        limit: Max rekordów
+        repository: Repository instance
+        output_file: Path to the output file
+        hours: Filter by time
+        collection_name: Filter by collection
+        limit: Max records
     """
     try:
         import pandas as pd
@@ -274,7 +274,7 @@ def export_to_json(
         collection_name: Optional[str] = None,
         limit: int = 10000
 ):
-    """Eksportuj metryki do JSON"""
+    """Export metrics to JSON"""
     import json
 
     try:
@@ -288,7 +288,7 @@ def export_to_json(
             print("[WARNING] Brak danych do eksportu")
             return False
 
-        # Konwersja datetime do string
+        # Convert datetime to string
         for metric in raw_metrics:
             if 'timestamp' in metric and isinstance(metric['timestamp'], datetime):
                 metric['timestamp'] = metric['timestamp'].isoformat()
@@ -310,7 +310,7 @@ def export_to_json(
 # ==============================================================================
 
 def interactive_mode(repository: IMetricsRepository):
-    """Interaktywny tryb analizy"""
+    """Interactive analysis mode"""
     print("\n" + "=" * 70)
     print("         INTERACTIVE METRICS ANALYZER")
     print("=" * 70)
@@ -375,34 +375,34 @@ def interactive_mode(repository: IMetricsRepository):
 # ==============================================================================
 
 def main():
-    """Główna funkcja CLI"""
+    """Main CLI function"""
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Analiza metryk RAG (niezależnie od typu bazy)",
+        description="RAG metrics analysis (independent of the database type)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Przykłady użycia:
+Usage examples:
 
-  # Podstawowy dashboard (ostatnie 24h)
+  # Basic dashboard (last 24h)
   python test_view_metrics_analyzer.py
 
-  # Dashboard dla ostatnich 48h
+  # Dashboard for the last 48h
   python test_view_metrics_analyzer.py --hours 48
 
-  # Filtruj po kolekcji
+  # Filter by collection
   python test_view_metrics_analyzer.py --collection my_collection --hours 24
 
-  # Eksport do CSV
+  # Export to CSV
   python test_view_metrics_analyzer.py --export metrics.csv --hours 168
 
-  # Eksport do JSON
+  # Export to JSON
   python test_view_metrics_analyzer.py --export-json metrics.json
 
-  # Tryb interaktywny
+  # Interactive mode
   python test_view_metrics_analyzer.py --interactive
 
-  # Użyj innego storage niż w .env
+  # Use a different storage than in .env
   python test_view_metrics_analyzer.py --storage-type file --hours 24
         """
     )
@@ -411,54 +411,54 @@ Przykłady użycia:
         "--hours",
         type=int,
         default=24,
-        help="Zakres czasowy w godzinach (domyślnie: 24)"
+        help="Time range in hours (default: 24)"
     )
 
     parser.add_argument(
         "--collection",
         default=None,
-        help="Filtruj po nazwie kolekcji"
+        help="Filter by collection name"
     )
 
     parser.add_argument(
         "--limit",
         type=int,
         default=1000,
-        help="Maksymalna liczba rekordów (domyślnie: 1000)"
+        help="Maximum number of records (default: 1000)"
     )
 
     parser.add_argument(
         "--export",
-        help="Eksportuj dane do pliku CSV"
+        help="Export data to a CSV file"
     )
 
     parser.add_argument(
         "--export-json",
-        help="Eksportuj dane do pliku JSON"
+        help="Export data to a JSON file"
     )
 
     parser.add_argument(
         "--storage-type",
         choices=["postgres", "file"],
         default=None,
-        help="Typ storage (nadpisuje .env)"
+        help="Storage type (overrides .env)"
     )
 
     parser.add_argument(
         "--interactive",
         action="store_true",
-        help="Uruchom w trybie interaktywnym"
+        help="Run in interactive mode"
     )
 
     parser.add_argument(
         "--raw-stats",
         action="store_true",
-        help="Pokaż surowe statystyki (bez formatowania)"
+        help="Show raw statistics (without formatting)"
     )
 
     args = parser.parse_args()
 
-    # ===== INICJALIZACJA REPOSITORY =====
+    # ===== REPOSITORY INITIALIZATION =====
     try:
         if args.storage_type:
             from metrics import create_repository
@@ -468,7 +468,7 @@ Przykłady użycia:
 
         logger.info(f"Używam repository: {repository.__class__.__name__}")
 
-        # Test połączenia
+        # Test the connection
         if not repository.test_connection():
             print("[ERROR] Nie można połączyć się z storage metryk")
             print("Sprawdź konfigurację w .env")
@@ -479,14 +479,14 @@ Przykłady użycia:
         logger.error(f"Repository init error: {e}")
         sys.exit(1)
 
-    # ===== WYKONAJ AKCJĘ =====
+    # ===== PERFORM THE ACTION =====
     try:
         if args.interactive:
-            # Tryb interaktywny
+            # Interactive mode
             interactive_mode(repository)
 
         elif args.export:
-            # Eksport do CSV
+            # Export to CSV
             success = export_to_csv(
                 repository,
                 args.export,
@@ -497,7 +497,7 @@ Przykłady użycia:
             sys.exit(0 if success else 1)
 
         elif args.export_json:
-            # Eksport do JSON
+            # Export to JSON
             success = export_to_json(
                 repository,
                 args.export_json,
@@ -508,7 +508,7 @@ Przykłady użycia:
             sys.exit(0 if success else 1)
 
         elif args.raw_stats:
-            # Surowe statystyki
+            # Raw statistics
             stats = repository.get_aggregated_stats(
                 hours=args.hours,
                 collection_name=args.collection
@@ -520,7 +520,7 @@ Przykłady użycia:
             print("=" * 70)
 
         else:
-            # Domyślnie: dashboard
+            # Default: dashboard
             print_dashboard(
                 repository,
                 hours=args.hours,
@@ -549,46 +549,46 @@ if __name__ == "__main__":
     main()
 
 # Description
-#Tryb interaktywny (--interactive)
+# Interactive mode (--interactive)
 # Bash
 #
 # python test_view_metrics_analyzer.py --interactive
-# Eksport do JSON (oprócz CSV)
+# Export to JSON (in addition to CSV)
 # Bash
 #
 # python test_view_metrics_analyzer.py --export-json metrics.json --hours 48
-# Surowe statystyki (--raw-stats)
+# Raw statistics (--raw-stats)
 # Bash
 #
 # python test_view_metrics_analyzer.py --raw-stats --hours 24
-# Nadpisanie typu storage z CLI
+# Overriding the storage type from the CLI
 # Bash
 #
 # python test_view_metrics_analyzer.py --storage-type file --hours 24
-# ✅ Przykłady użycia
+# ✅ Usage examples
 # Bash
 #
-# # Dashboard dla ostatnich 24h (domyślnie)
+# # Dashboard for the last 24h (default)
 # python test_view_metrics_analyzer.py
 #
-# # Dashboard dla ostatnich 7 dni
+# # Dashboard for the last 7 days
 # python test_view_metrics_analyzer.py --hours 168
 #
-# # Filtruj po kolekcji
+# # Filter by collection
 # python test_view_metrics_analyzer.py --collection iso_standards --hours 48
 #
-# # Eksport do CSV (ostatnie 30 dni)
+# # Export to CSV (last 30 days)
 # python test_view_metrics_analyzer.py --export report.csv --hours 720
 #
-# # Eksport do JSON
+# # Export to JSON
 # python test_view_metrics_analyzer.py --export-json data.json --hours 24
 #
-# # Tryb interaktywny (menu)
+# # Interactive mode (menu)
 # python test_view_metrics_analyzer.py --interactive
 #
-# # Wymuś użycie pliku zamiast Postgres
+# # Force using a file instead of Postgres
 # python test_view_metrics_analyzer.py --storage-type file
 #
-# # Kombinacja filtrów
+# # Combined filters
 # python test_view_metrics_analyzer.py --collection iso --hours 12 --limit 500
 

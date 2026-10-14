@@ -1,29 +1,29 @@
 import os
 import sys
 import logging
-import json  # <--- Dodano do pretty-printingu JSONa
+import json  # <--- Added for pretty-printing JSON
 
 from dotenv import load_dotenv
 from buissnes_agent.config_loader import get_settings
 
-# Upewnij się, że ten import pasuje do struktury Twojego projektu
+# Make sure this import matches the structure of your project
 from buissnes_agent.QdrantDatabaseStore import QdrantDatabaseStore
 
-# Konfiguracja logowania
+# Logging configuration
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("DB-Viewer")
 
-# Ładowanie zmiennych środowiskowych
+# Loading environment variables
 load_dotenv()
 settings = get_settings()
 
 def view_entries(limit: int = 5):
     """
-    Pobiera i wyświetla N ostatnich wpisów z kolekcji Qdrant.
-    Wyświetla PEŁNY PAYLOAD (wszystkie metadane) w formacie JSON.
+    Fetches and displays the last N entries from a Qdrant collection.
+    Displays the FULL PAYLOAD (all metadata) in JSON format.
     """
 
-    # 1. Pobieranie konfiguracji z .env
+    # 1. Loading configuration from .env
     qdrant_url = os.getenv("QDRANT_API")
     qdrant_key = os.getenv("QDRANT_API_KEY")
     collection_name = settings.get("vector_db.collection_name")
@@ -33,7 +33,7 @@ def view_entries(limit: int = 5):
         logger.error("Brak QDRANT_API w pliku .env")
         return
 
-    # 2. Inicjalizacja Twojej klasy Store
+    # 2. Initializing your Store class
     vector_size = 1536
     try:
         store = QdrantDatabaseStore(
@@ -56,7 +56,7 @@ def view_entries(limit: int = 5):
     print(f"Pobieranie {limit} wpisów...\n")
 
     try:
-        # 3. Użycie metody SCROLL z klienta Qdrant
+        # 3. Using the SCROLL method of the Qdrant client
         records, next_page_offset = store.client.scroll(
             collection_name=collection_name,
             limit=limit,
@@ -68,15 +68,15 @@ def view_entries(limit: int = 5):
             print("Brak wpisów w bazie.")
             return
 
-        # 4. Wyświetlanie wyników
+        # 4. Displaying results
         for i, record in enumerate(records, 1):
             payload = record.payload
 
             print(f"[{i}] Qdrant UUID: {record.id}")
             print("PEŁNE DANE (PAYLOAD):")
 
-            # json.dumps sformatuje słownik payloadu w czytelną strukturę
-            # ensure_ascii=False pozwala wyświetlać polskie znaki
+            # json.dumps will format the payload dict into a readable structure
+            # ensure_ascii=False allows displaying Polish characters
             print(json.dumps(payload, indent=4, ensure_ascii=False))
 
             print("-" * 80)
@@ -84,15 +84,15 @@ def view_entries(limit: int = 5):
     except Exception as e:
         logger.error(f"Błąd podczas pobierania danych: {e}")
 
-    # 5. Podsumowanie bazy (rozmiar i liczba chunków)
+    # 5. Database summary (size and number of chunks)
     print_db_summary(store, collection_name, vector_size)
 
 
 def print_db_summary(store, collection_name: str, vector_size: int):
     """
-    Wyświetla podsumowanie bazy danych:
-    - liczbę chunków (punktów),
-    - rozmiar bazy w bajtach (payload + wektory) oraz rozmiar w formie czytelnej.
+    Displays a database summary:
+    - number of chunks (points),
+    - database size in bytes (payload + vectors) and a human-readable size.
     """
     print(f"\n{'=' * 80}")
     print(f"PODSUMOWANIE BAZY DANYCH: {collection_name}")
@@ -105,7 +105,7 @@ def print_db_summary(store, collection_name: str, vector_size: int):
             n /= 1024.0
 
     try:
-        # Liczba chunków (punktów) w kolekcji
+        # Number of chunks (points) in the collection
         points_count = store.count()
 
         if points_count == 0:
@@ -114,7 +114,7 @@ def print_db_summary(store, collection_name: str, vector_size: int):
             print(f"{'=' * 80}")
             return
 
-        # Rozmiar payloadów — przeliczamy, przeskanowując wszystkie wpisy
+        # Payload size - computed by scanning all entries
         payload_bytes = 0
         offset = None
         page_size = 1000
@@ -131,7 +131,7 @@ def print_db_summary(store, collection_name: str, vector_size: int):
             if offset is None:
                 break
 
-        # Rozmiar wektorów — znany: liczba punktów * wymiar * 4 bajty (float32)
+        # Vector size - known: number of points * dimension * 4 bytes (float32)
         vector_bytes = points_count * vector_size * 4
         total_bytes = payload_bytes + vector_bytes
 
@@ -146,7 +146,7 @@ def print_db_summary(store, collection_name: str, vector_size: int):
 
 
 if __name__ == "__main__":
-    # Obsługa argumentu z linii poleceń
+    # Handling the command-line argument
     qty = 1000
     if len(sys.argv) > 3:
         try:

@@ -11,12 +11,12 @@ logger = logging.getLogger(__name__)
 
 class MetricsRepositoryFactory:
     """
-    Factory do tworzenia odpowiedniego repository na podstawie ENV.
+    Factory for creating the appropriate repository based on ENV.
 
-    Wspierane typy:
+    Supported types:
     - postgres: PostgreSQL
     - file: JSONL file storage
-    - (możliwość rozszerzenia: mysql, mongodb, redis, etc.)
+    - (extensible: mysql, mongodb, redis, etc.)
     """
 
     _instance: Optional[IMetricsRepository] = None
@@ -36,17 +36,17 @@ class MetricsRepositoryFactory:
             **kwargs
     ) -> IMetricsRepository:
         """
-        Utwórz repository na podstawie typu storage
+        Create a repository based on the storage type
 
         Args:
-            storage_type: Typ storage ("postgres", "file") lub None (z ENV)
-            **kwargs: Dodatkowe parametry (np. file_path dla file storage)
+            storage_type: Storage type ("postgres", "file") or None (from ENV)
+            **kwargs: Additional parameters (e.g. file_path for file storage)
 
         Returns:
-            IMetricsRepository: Instancja odpowiedniego repository
+            IMetricsRepository: Instance of the appropriate repository
 
         Raises:
-            ValueError: Gdy typ storage jest nieznany
+            ValueError: If the storage type is unknown
         """
         if storage_type is None:
             storage_type = os.getenv("METRICS_STORAGE_TYPE", "file").lower()
@@ -73,9 +73,9 @@ class MetricsRepositoryFactory:
     @classmethod
     def get_singleton(cls, storage_type: Optional[str] = None) -> IMetricsRepository:
         """
-        Pobierz singleton instance repository
+        Get the singleton repository instance
 
-        Przy pierwszym wywołaniu tworzy instancję, później zwraca tę samą.
+        On the first call it creates the instance, later calls return the same one.
         """
         if cls._instance is None:
             cls._instance = cls.create(storage_type)
@@ -83,7 +83,7 @@ class MetricsRepositoryFactory:
 
     @classmethod
     def reset_singleton(cls):
-        """Wymuś reset singletona (przydatne w testach)"""
+        """Force a singleton reset (useful in tests)"""
         if cls._instance:
             cls._instance.close()
         cls._instance = None

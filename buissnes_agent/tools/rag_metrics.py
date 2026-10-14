@@ -1,19 +1,22 @@
 import logging
-import os
 import time
 from datetime import datetime
 from typing import Optional, List
 
 try:
     from buissnes_agent.metrics import (
+        ChunkingRunMetrics,
         FullRAGMetrics,
+        GenerationMetrics,
         IMetricsRepository,
         RetrievalMetrics,
         get_repository,
     )
 except ImportError:
     from metrics import (  # type: ignore
+        ChunkingRunMetrics,
         FullRAGMetrics,
+        GenerationMetrics,
         IMetricsRepository,
         RetrievalMetrics,
         get_repository,
@@ -23,24 +26,14 @@ logger = logging.getLogger(__name__)
 
 
 # ==============================================================================
-# KONFIGURACJA
+# METRIC CALCULATORS
 # ==============================================================================
-
-def _get_metrics_enabled() -> bool:
-    """Sprawdź czy metryki są włączone"""
-    enabled = os.getenv("ENABLE_RAG_METRICS", "false").lower()
-    return enabled in ("true", "1", "yes", "on")
-
-
-METRICS_ENABLED = _get_metrics_enabled()
-
-
-# ==============================================================================
-# KALKULATORY METRYK
-# ==============================================================================
+# Note: metrics are always active (no enabling flag).
+# The only guard: as long as the metrics repository is available
+# (e.g. Postgres is up) - see MetricsCollector.is_enabled().
 
 class MetricsCalculator:
-    """Klasa z metodami obliczającymi metryki"""
+    """Class with methods that calculate metrics"""
 
     @staticmethod
     def calculate_avg_score(scores: List[float]) -> float:
@@ -65,7 +58,7 @@ class MetricsCalculator:
             embedding_latency_ms: Optional[int] = None,
             search_latency_ms: Optional[int] = None
     ) -> RetrievalMetrics:
-        """Factory method dla RetrievalMetrics"""
+        """Factory method for RetrievalMetrics"""
         top_scores = MetricsCalculator.extract_top_scores(points) if points else []
         avg_score = MetricsCalculator.calculate_avg_score(top_scores)
 
@@ -87,7 +80,7 @@ class MetricsCalculator:
             collection_name: str,
             latency_ms: int
     ) -> RetrievalMetrics:
-        """Factory method dla metryk błędu"""
+        """Factory method for error metrics"""
         return RetrievalMetrics(
             query=query,
             collection_name=collection_name,
@@ -100,14 +93,14 @@ class MetricsCalculator:
 
 
 # ==============================================================================
-# METRICS COLLECTOR (używa interfejsu)
+# METRICS COLLECTOR (uses the interface)
 # ==============================================================================
 
 class MetricsCollector:
     """
-    Singleton do zbierania metryk.
+    Singleton for collecting metrics.
 
-    Używa IMetricsRepository - nie wie jaka to konkretna baza!
+    Uses IMetricsRepository - it doesn't know which concrete database it is!
     """
 
     _instance = None
@@ -119,25 +112,22 @@ class MetricsCollector:
         return cls._instance
 
     def _initialize(self):
-        """Inicjalizacja collectora"""
-        self.enabled = METRICS_ENABLED
+        """Collector initialization (metrics are always active)"""
         self.repository: Optional[IMetricsRepository] = None
 
-        if self.enabled:
-            try:
-                # Używamy factory - nie wiemy czy to Postgres czy File!
-                self.repository = get_repository()
-                logger.info("Metrics collector zainicjalizowany")
-            except Exception as e:
-                logger.error(f"Nie można zainicjalizować repository: {e}")
-                self.enabled = False
+        try:
+            # We use a factory - we don't know whether it's Postgres or File!
+            self.repository = get_repository()
+            logger.info("Metrics collector zainicjalizowany")
+        except Exception as e:
+            logger.error(f"Nie można zainicjalizować repository: {e}")
 
     def is_enabled(self) -> bool:
-        """Sprawdź czy zbieranie metryk jest włączone"""
-        return self.enabled and self.repository is not None
+        """Metrics are always active - enabled as long as the repository is available"""
+        return self.repository is not None
 
     def log_retrieval(self, metrics: RetrievalMetrics) -> None:
-        """Zapisz metryki retrieval (przez interfejs!)"""
+        """Save retrieval metrics (via the interface!)"""
         if not self.is_enabled():
             return
 
@@ -158,8 +148,36 @@ class MetricsCollector:
         except Exception as e:
             logger.error(f"Błąd zapisu metryk: {e}")
 
+    def log_generation(self, metrics: GenerationMetrics,
+                       retrieval_id: Optional[int] = None) -> Optional[int]:
+        """
+        Save generation metrics (via the interface!).
+        retrieval_id: optional link to the retrieval row (Stack B).
+        Returns the id of the saved row (None on failure).
+        """
+        if not self.is_enabled():
+            return None
+
+        try:
+            record_id = self.repository.insert_generation_metrics(metrics, retrieval_id)
+
+            if record_id:
+                logger.info(
+                    f"[Generation Metrics] "
+                    f"Query: '{metrics.query[:50]}...', "
+                    f"Latency: {metrics.latency_ms}ms"
+                )
+            else:
+                logger.warning("Nie udało się zapisać metryk generation")
+
+            return record_id
+
+        except Exception as e:
+            logger.error(f"Błąd zapisu metryk generation: {e}")
+            return None
+
     def log_full_rag(self, metrics: FullRAGMetrics) -> None:
-        """Zapisz pełne metryki RAG (przez interfejs!)"""
+        """Save full RAG metrics (via the interface!)"""
         if not self.is_enabled():
             return
 
@@ -177,11 +195,114 @@ class MetricsCollector:
         except Exception as e:
             logger.error(f"Błąd zapisu full metrics: {e}")
 
+    def log_chunking(self, metrics: ChunkingRunMetrics) -> None:
+        """Save chunking metrics (via the interface!)"""
+        if not self.is_enabled():
+            return
+
+        try:
+            record_id = self.repository.insert_chunking_metrics(metrics)
+
+            if record_id:
+                logger.info(
+                    f"[Chunking Metrics] "
+                    f"Exp: {metrics.experiment_id}, "
+                    f"Strategy: {metrics.strategy}, "
+                    f"Source: {metrics.source}, "
+                    f"Chunks: {metrics.num_chunks}, "
+                    f"Total: {metrics.total_ms}ms"
+                )
+            else:
+                logger.warning("Nie udało się zapisać metryk chunkingu")
+
+        except Exception as e:
+            logger.error(f"Błąd zapisu metryk chunkingu: {e}")
+
     def close(self):
-        """Zamknij połączenia"""
+        """Close connections"""
         if self.repository:
             self.repository.close()
 
 
 # Singleton instance
 metrics_collector = MetricsCollector()
+
+
+# ==============================================================================
+# FULL METRICS FOR A RAG TURN (shared helper for Stacks A and B)
+# ==============================================================================
+def log_full_rag_for_turn(query: str,
+                          answer: str,
+                          context_chars: Optional[int],
+                          total_latency_ms: Optional[int]) -> None:
+    """
+    Complete saving of the RAG turn's metrics (shared by Stacks A and B):
+    1. finds the freshest retrieval row for the same query
+       (saved by the MCP server in tool_iso_rag),
+    2. saves generation - with a retrieval_id link if the row exists,
+    3. if a retrieval row exists: inserts rag_full_metrics with links to both.
+
+    No retrieval row (question without the DB) => generation only, no full.
+    Best-effort: silently skipped if the repository is missing, never breaks the app.
+    """
+    if not metrics_collector.is_enabled():
+        return
+
+    try:
+        row = None
+        try:
+            # NOTE: the query in the retrieval row is the AGENT's query (the LLM
+            # rewrites it for the tool), not the user's literal question -
+            # so matching by text rarely hit. Instead:
+            # the freshest retrieval row from a 5-minute window (the turn ended
+            # just now) + a fallback to exact matching.
+            rows = metrics_collector.repository.get_retrieval_metrics(limit=20)
+            now = datetime.now()
+            row = next(
+                (r for r in rows
+                 if r.get("query") == query
+                 or (isinstance(r.get("timestamp"), datetime)
+                     and (now - r["timestamp"]).total_seconds() < 300)),
+                None
+            )
+        except Exception as e:
+            logger.debug("Odczyt retrieval metrics nieudany: %s", e)
+
+        retrieval_id = row.get("id") if row else None
+
+        # 2) generation (with a retrieval link, if one exists)
+        generation = GenerationMetrics(
+            query=query,
+            answer=answer,
+            context_length=context_chars,
+            latency_ms=total_latency_ms,
+            timestamp=datetime.now().isoformat(),
+        )
+        generation_id = metrics_collector.log_generation(generation, retrieval_id)
+
+        # 3) full metrics - only if the turn queried the database
+        if row is None:
+            logger.debug(
+                "Brak wiersza retrieval dla zapytania '%s' - pomijam full metrics",
+                query
+            )
+            return
+
+        from dataclasses import fields
+
+        valid = {f.name for f in fields(RetrievalMetrics)}
+        retrieval = RetrievalMetrics(
+            **{k: v for k, v in row.items() if k in valid}
+        )
+
+        full = FullRAGMetrics(
+            retrieval=retrieval,
+            retrieval_id=retrieval_id,
+            generation=generation,
+            generation_id=generation_id,
+            total_latency_ms=total_latency_ms,
+        )
+        metrics_collector.log_full_rag(full)
+
+    except Exception as e:
+        logger.error(f"Błąd zapisu metryk tury RAG: {e}")

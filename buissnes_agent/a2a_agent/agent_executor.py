@@ -1,5 +1,7 @@
 import logging
 import re
+import time
+from datetime import datetime
 from typing import Any, Literal
 
 import httpx
@@ -35,6 +37,23 @@ CONTEXT_WINDOW_PATTERN = re.compile(
 )
 
 TaskStateName = Literal['working', 'completed', 'input_required', 'failed']
+
+
+def _log_generation_metrics(query: str, answer: str, started_at: float) -> None:
+    """
+    Best-effort save of turn metrics (generation + full metrics, Stack B).
+    Metrics errors NEVER abort the execution of the A2A task.
+    """
+    try:
+        try:
+            from buissnes_agent.tools.rag_metrics import log_full_rag_for_turn
+        except ImportError:
+            from ..tools.rag_metrics import log_full_rag_for_turn  # type: ignore
+
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        log_full_rag_for_turn(query, answer, None, latency_ms)
+    except Exception:
+        logger.debug("Nie zapisano metryk tury (Stack B)", exc_info=True)
 
 
 class AnalysisAgentExecutor(AgentExecutor):
@@ -91,6 +110,9 @@ class AnalysisAgentExecutor(AgentExecutor):
         )
         last_status_signature: tuple[str, str] | None = None
 
+        # Start of the turn measurement (generation metrics, Stack B)
+        started_at = time.perf_counter()
+
         try:
             async for item in self.agent.stream(
                 query,
@@ -128,6 +150,9 @@ class AnalysisAgentExecutor(AgentExecutor):
                             metadata=metadata,
                         )
                     )
+
+                    # Generation metrics (Stack B): final task response
+                    _log_generation_metrics(query, content, started_at)
                     return
 
                 if task_state == 'input_required':

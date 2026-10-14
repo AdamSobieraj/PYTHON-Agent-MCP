@@ -5,31 +5,37 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .repository_interface import IMetricsRepository
-from .models import RetrievalMetrics, GenerationMetrics, FullRAGMetrics, MetricsStats
+from .models import (
+    RetrievalMetrics,
+    GenerationMetrics,
+    FullRAGMetrics,
+    ChunkingRunMetrics,
+    MetricsStats
+)
 
 logger = logging.getLogger(__name__)
 
 
 class FileMetricsRepository(IMetricsRepository):
-    """Implementacja repository dla pliku JSONL"""
+    """Repository implementation for a JSONL file"""
 
     def __init__(self, file_path: str = "rag_metrics.jsonl"):
         self.file_path = Path(file_path)
         self._ensure_file_exists()
 
     def _ensure_file_exists(self):
-        """Upewnij się, że plik istnieje"""
+        """Ensure the file exists"""
         if not self.file_path.exists():
             self.file_path.touch()
             logger.info(f"Utworzono plik metryk: {self.file_path}")
 
     def initialize_schema(self) -> bool:
-        """Implementacja: dla pliku nie ma schematu"""
+        """Implementation: a file has no schema"""
         self._ensure_file_exists()
         return True
 
     def test_connection(self) -> bool:
-        """Implementacja: sprawdź czy możemy pisać do pliku"""
+        """Implementation: check whether we can write to the file"""
         try:
             self._ensure_file_exists()
             return self.file_path.exists() and self.file_path.is_file()
@@ -38,11 +44,11 @@ class FileMetricsRepository(IMetricsRepository):
             return False
 
     def insert_retrieval_metrics(self, metrics: RetrievalMetrics) -> Optional[int]:
-        """Implementacja: dopisz do pliku JSONL"""
+        """Implementation: append to the JSONL file"""
         try:
             with open(self.file_path, "a", encoding="utf-8") as f:
                 f.write(metrics.to_json() + "\n")
-            # Dla pliku zwracamy timestamp jako "ID"
+            # For a file, we return the timestamp as the "ID"
             return int(datetime.now().timestamp() * 1000)
         except Exception as e:
             logger.error(f"Błąd zapisu do pliku: {e}")
@@ -53,7 +59,7 @@ class FileMetricsRepository(IMetricsRepository):
             metrics: GenerationMetrics,
             retrieval_id: Optional[int] = None
     ) -> Optional[int]:
-        """Implementacja: dopisz generation metrics"""
+        """Implementation: append generation metrics"""
         try:
             data = {
                 **metrics.to_dict(),
@@ -67,7 +73,7 @@ class FileMetricsRepository(IMetricsRepository):
             return None
 
     def insert_full_metrics(self, metrics: FullRAGMetrics) -> Optional[int]:
-        """Implementacja: dopisz pełne metryki"""
+        """Implementation: append full metrics"""
         try:
             with open(self.file_path, "a", encoding="utf-8") as f:
                 f.write(metrics.to_json() + "\n")
@@ -82,7 +88,7 @@ class FileMetricsRepository(IMetricsRepository):
             collection_name: Optional[str] = None,
             hours: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """Implementacja: odczyt z pliku z filtrowaniem"""
+        """Implementation: read from the file with filtering"""
         metrics = []
 
         try:
@@ -91,11 +97,11 @@ class FileMetricsRepository(IMetricsRepository):
                     if line.strip():
                         data = json.loads(line)
 
-                        # Filtruj po collection_name
+                        # Filter by collection_name
                         if collection_name and data.get("collection_name") != collection_name:
                             continue
 
-                        # Filtruj po czasie
+                        # Filter by time
                         if hours:
                             timestamp = datetime.fromisoformat(data.get("timestamp", ""))
                             cutoff = datetime.now() - timedelta(hours=hours)
@@ -104,7 +110,7 @@ class FileMetricsRepository(IMetricsRepository):
 
                         metrics.append(data)
 
-            # Sortuj po timestamp (DESC) i ogranicz
+            # Sort by timestamp (DESC) and limit
             metrics.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
             return metrics[:limit]
 
@@ -120,9 +126,9 @@ class FileMetricsRepository(IMetricsRepository):
             hours: Optional[int] = 24,
             collection_name: Optional[str] = None
     ) -> MetricsStats:
-        """Implementacja: oblicz statystyki z pliku"""
+        """Implementation: compute statistics from the file"""
         metrics = self.get_retrieval_metrics(
-            limit=10000,  # Pobierz wszystkie
+            limit=10000,  # Get all
             collection_name=collection_name,
             hours=hours
         )
@@ -139,7 +145,7 @@ class FileMetricsRepository(IMetricsRepository):
                 queries_no_results=0
             )
 
-        # Oblicz statystyki
+        # Compute statistics
         latencies = sorted([m['latency_ms'] for m in metrics])
         scores = [m['avg_score'] for m in metrics]
         results = [m['num_results'] for m in metrics]
@@ -163,6 +169,49 @@ class FileMetricsRepository(IMetricsRepository):
             queries_no_results=sum(1 for r in results if r == 0)
         )
 
+    def insert_chunking_metrics(self, metrics: ChunkingRunMetrics) -> Optional[int]:
+        """Implementation: append chunking metrics to the JSONL file"""
+        try:
+            with open(self.file_path, "a", encoding="utf-8") as f:
+                f.write(metrics.to_json() + "\n")
+            return int(datetime.now().timestamp() * 1000)
+        except Exception as e:
+            logger.error(f"Błąd zapisu metryk chunking: {e}")
+            return None
+
+    def get_chunking_metrics(
+            self,
+            limit: int = 100,
+            experiment_id: Optional[str] = None,
+            strategy: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Implementation: read chunking metrics with filtering"""
+        records: List[Dict[str, Any]] = []
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    # File shared with other metric types -
+                    # fetch only chunking records
+                    if "experiment_id" not in data:
+                        continue
+                    if experiment_id and data.get("experiment_id") != experiment_id:
+                        continue
+                    if strategy and data.get("strategy") != strategy:
+                        continue
+                    records.append(data)
+        except FileNotFoundError:
+            logger.warning(f"Plik metryk nie istnieje: {self.file_path}")
+            return []
+        except Exception as e:
+            logger.error(f"Błąd odczytu metryk chunking: {e}")
+            return []
+
+        records.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return records[:limit]
+
     def close(self) -> None:
-        """Implementacja: dla pliku nie ma co zamykać"""
+        """Implementation: nothing to close for a file"""
         pass

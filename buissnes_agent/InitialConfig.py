@@ -18,29 +18,29 @@ KNOWLEDGE_BASE = None
 
 def get_knowledge_base():
     """
-    Singleton Pattern: Tworzy lub zwraca istniejącą instancję SearchKnowledgebase.
-    Odpowiada za wstrzyknięcie zależności (Client, Store, Config).
+    Singleton Pattern: Creates or returns the existing SearchKnowledgebase instance.
+    Responsible for dependency injection (Client, Store, Config).
     """
     settings = get_settings()
 
     global KNOWLEDGE_BASE
     if KNOWLEDGE_BASE:
         return KNOWLEDGE_BASE
-    # Lazy import - zapobiega błędom cyklicznego importu
+    # Lazy import - prevents circular import errors
     from KnowledgebasePipeline import SearchKnowledgebase
-    # 1. Konfiguracja Chunkera
+    # 1. Chunker configuration
     data_source = settings.get("data_source.type")
-    # 2. Konfiguracja Wymiaru Embeddings
+    # 2. Embedding dimension configuration
     # OpenAI text-embedding-3-small/large = 1536, Nomic/Titan = 768
     try:
         emb_dim = int(os.getenv("EMBEDDING_DIM"))
     except (TypeError, ValueError):
         emb_dim = 1536
     # =========================================================
-    # DYNAMICZNY IMPORT LOADERA (Warstwa Danych)
+    # DYNAMIC LOADER IMPORT (Data Layer)
     # =========================================================
-    # Importujemy klasę dopiero tutaj, wewnątrz IF-a.
-    # Dzięki temu nie musimy mieć boto3, jeśli używamy 'local'.
+    # The class is imported only here, inside the IF block.
+    # This way we don't need boto3 when using 'local'.
     if data_source == "s3":
         logger.info("Dynamic Import: Ladowanie modulu S3...")
         from DataLoaderS3FileLoader import DataLoaderS3FileLoader
@@ -51,13 +51,13 @@ def get_knowledge_base():
         )
     else:
         logger.info("Dynamic Import: Ladowanie modulu LocalFile...")
-        # Import wewnątrz funkcji!
+        # Import inside the function!
         from DataLoaderLocalFileLoader import DataLoaderLocalFileLoader
 
         data_loader = DataLoaderLocalFileLoader(
             directory=settings.get("data_source.local_input_path")
         )
-    # 3. Inicjalizacja Klientów
+    # 3. Client initialization
     embedding_client = LocalEmbeddingClient()
 
     store = QdrantDatabaseStore(
@@ -66,13 +66,13 @@ def get_knowledge_base():
         collection_name=settings.get("vector_db.collection_name"),
         vector_size=emb_dim,
     )
-    # 4. Instancjalizacja Głównego Orkiestratora
+    # 4. Initialization of the Main Orchestrator
     KNOWLEDGE_BASE = SearchKnowledgebase(
         client=embedding_client,
         database_store=store,
         data_loader=data_loader,
         embedding_model=os.getenv("EMBEDDING_MODEL"),
-        force_refresh=False, # Ustaw True w .env lub tutaj, aby wymusić przeładowanie bazy
+        force_refresh=False, # Set True in .env or here to force a database reload
     )
     return KNOWLEDGE_BASE
 

@@ -5,21 +5,22 @@ from langchain_core.documents import Document
 
 class ChunkingStrategy(ABC):
     """
-    ### Klasa Abstrakcyjna: Interfejs Strategii
+    ### Abstract Class: Strategy Interface
 
-    Definiuje kontrakt, który musi spełnić każda metoda podziału tekstu.
-    Dzięki temu główna klasa (LangChainChunker) nie musi znać szczegółów implementacji
-    (np. czy używamy AI, czy regexów), a jedynie wywołuje metodę `split_text`.
+    Defines the contract that every text-splitting method must fulfill.
+    This way the main class (LangChainChunker) does not need to know the implementation
+    details (e.g. whether AI or regular expressions are used), it only calls the `split_text` method.
 
-    **Rozszerzenie:**
-    To fundament wzorca Strategy. Jeśli w przyszłości będziemy chcieli dodać np. podział kodu Python,
-    wystarczy dodać nową klasę dziedziczącą po ChunkingStrategy, bez modyfikowania głównego silnika.
+    **Extension:**
+    This is the foundation of the Strategy pattern. If we ever want to add, for example,
+    Python code splitting, we only need to add a new class inheriting from ChunkingStrategy,
+    without modifying the main engine.
     """
 
     @abstractmethod
     def split_documents(self, documents: List[Document]) -> List[Document]:
         """
-        Metoda odpowiedzialna za logiczny podział tekstu na mniejsze fragmenty (Document objects).
-        Każda strategia implementuje tę metodę na swój własny sposób.
+        Method responsible for logically splitting the text into smaller fragments (Document objects).
+        Each strategy implements this method in its own way.
         """
         pass

@@ -17,10 +17,9 @@ class NewSemanticStrategy(ChunkingStrategy):
     ### Strategy 7: Semantic (Self-contained / Adaptive)
 
     Splits text at topic changes detected via sentence embeddings.
-    Unlike SemanticStrategy (which wraps langchain_experimental's SemanticChunker),
-    this implementation is self-contained: sentence detection, similarity
-    computation and breakpoint selection are done here in pure Python,
-    using the project's local embedding client.
+    Self-contained: sentence detection, similarity computation and
+    breakpoint selection are done here in pure Python, using the
+    project's local embedding client.
 
     **How it works:**
     1. Text is split into sentences (via NewSentenceBasedStrategy).
@@ -43,7 +42,8 @@ class NewSemanticStrategy(ChunkingStrategy):
             chunk_size: int,
             chunk_overlap: int,
             breakpoint_percentile: float = 50.0,
-            min_chunk_size: int = 100
+            min_chunk_size: int = 100,
+            embeddings=None
     ):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -51,8 +51,9 @@ class NewSemanticStrategy(ChunkingStrategy):
         self.min_chunk_size = min_chunk_size
 
         # Initialize the embeddings client
+        # (an external client can be injected to share cost counters)
         try:
-            self.embeddings = LocalEmbeddingClient()
+            self.embeddings = embeddings or LocalEmbeddingClient()
             logger.info("NewSemanticStrategy: Initialized EmbeddingClient successfully.")
         except Exception as e:
             logger.error("NewSemanticStrategy: Failed to initialize embeddings. Error: %s", e)

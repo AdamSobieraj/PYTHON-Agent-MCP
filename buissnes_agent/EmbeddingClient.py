@@ -11,10 +11,10 @@ logger = logging.getLogger(__name__)
 
 class LocalEmbeddingClient(Embeddings):
     """
-    Klient Embeddingów dla serwerów (LM Studio, LocalAI, Ollama),
-    który omija restrykcyjne walidacje biblioteki `langchain_openai`.
+    Embedding client for local servers (LM Studio, LocalAI, Ollama),
+    which bypasses the strict validations of the `langchain_openai` library.
 
-    Wysyła surowe zapytania HTTP, obsługując specyficzne błędy formatowania JSON (błąd 400).
+    Sends raw HTTP requests, handling specific JSON formatting errors (HTTP 400).
     """
 
     def __init__(self,
@@ -24,29 +24,29 @@ class LocalEmbeddingClient(Embeddings):
                  dimensions: int = None,
                  batch_size: int = None):
 
-        # Pobieranie konfiguracji z argumentów lub zmiennych środowiskowych (.env)
+        # Configuration from arguments or environment variables (.env)
         self.base_url = base_url or os.getenv("EMBEDDING_BASE_URL")
         self.api_key = api_key or os.getenv("EMBEDDING_API_KEY")
         self.model = model or os.getenv("EMBEDDING_MODEL")
         self.dimensions = int(dimensions or os.getenv("EMBEDDING_DIM"))
 
-        # Konfiguracja mechanizmu Retry
+        # Retry mechanism configuration
         self.max_retries = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
         self.base_delay = float(os.getenv("EMBEDDING_DELAY", "1.0"))
 
-        # Ograniczenie ilości tekstów wysyłanych w jednym żądaniu HTTP
+        # Limit on the number of texts sent in a single HTTP request
         self.batch_size = batch_size or int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
 
         self.endpoint_url = f"{self.base_url}"
 
-        # 2. Inicjalizacja stałej sesji HTTP (przyspiesza zapytania w pętli - Connection Pooling)
+        # 2. Initialize a persistent HTTP session (speeds up requests in a loop - Connection Pooling)
         self.session = requests.Session()
         
-        # Wyłączenie weryfikacji SSL domyślnie (ominięcie blokad w korpo sieci),
-        # chyba że explicite włączono w .env
+        # SSL verification disabled by default (bypassing corporate network blocks),
+        # unless explicitly enabled in .env
         self.session.verify = os.getenv("SSL_VERIFY", 'False').lower() in ('true', '1', 't')
         
-        # Wymuś na requests ignorowanie systemowych i pythonowych certyfikatów CA
+        # Force requests to ignore system and Python CA certificates
         # os.environ['CURL_CA_BUNDLE'] = ''
         # os.environ['REQUESTS_CA_BUNDLE'] = ''
         if(os.getenv("TRUST_ENV_FALSE", 'False').lower() in ('true', '1', 't')):
@@ -64,21 +64,31 @@ class LocalEmbeddingClient(Embeddings):
             "Authorization": f"Bearer {self.api_key}"
         })
 
+        # Cost counters (E2 metrics): number of successful HTTP calls
+        # and number of texts sent for embedding.
+        self.http_requests = 0
+        self.texts_embedded = 0
+
         logger.info(f"Initialized LocalEmbeddingClient: {self.model} @ {self.endpoint_url}")
 
+    def reset_counters(self) -> None:
+        """Reset cost counters (call between documents / experiments)."""
+        self.http_requests = 0
+        self.texts_embedded = 0
+
     def _clean_text(self, text: Any) -> str:
-        """Prywatna metoda do czyszczenia pojedynczego tekstu."""
+        """Private method for cleaning a single text."""
         if hasattr(text, 'page_content'):
             text = text.page_content
 
         clean = str(text).replace("\n", " ").strip()
-        # Zabezpieczenie przed pustym stringiem wewnątrz batcha
+        # Guard against an empty string within a batch
         return clean if clean else " "
 
     def _post_with_retry(self, payload: dict) -> List[List[float]]:
         """
-        Główny silnik wysyłający zapytania HTTP z wbudowanym Retry, Backoff i Jitter.
-        Zwraca listę wektorów embeddingów.
+        Main engine sending HTTP requests with built-in Retry, Backoff and Jitter.
+        Returns a list of embedding vectors.
         """
 
         for attempt in range(self.max_retries):
@@ -92,16 +102,17 @@ class LocalEmbeddingClient(Embeddings):
                 )
 
                 if response.status_code == 200:
+                    self.http_requests += 1
                     data = response.json()
                     if "data" in data and len(data["data"]) > 0:
-                        # Zwracamy listę wektorów (niezależnie czy to jeden tekst czy batch)
-                        # API OpenAI sortuje wyniki w tablicy 'data', musimy je poprawnie wyciągnąć
+                        # Return the list of vectors (whether it is a single text or a batch)
+                        # The OpenAI API orders results in the 'data' array, we must extract them correctly
                         sorted_data = sorted(data["data"], key=lambda x: x.get("index", 0))
                         return [item["embedding"] for item in sorted_data]
                     else:
                         raise ValueError(f"Nieprawidłowy format odpowiedzi: {data}")
 
-                # Błąd 400 - niektóre serwery odrzucają stringa, wymagając jednoelementowej listy
+                # HTTP 400 - some servers reject a raw string, requiring a single-element list
                 if response.status_code == 400 and isinstance(payload["input"], str):
                     logger.warning("Błąd 400. Zmieniam payload na listę (['tekst']) dla kolejnych prób.")
                     payload["input"] = [payload["input"]]
@@ -129,8 +140,8 @@ class LocalEmbeddingClient(Embeddings):
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """
-        Generuje embeddingi dla listy tekstów używając BATCHINGU (Grupowania).
-        Znacznie redukuje ilość zapytań HTTP i przyspiesza proces.
+        Generates embeddings for a list of texts using BATCHING (grouping).
+        Significantly reduces the number of HTTP requests and speeds up the process.
         """
         if not texts:
             return []
@@ -138,7 +149,7 @@ class LocalEmbeddingClient(Embeddings):
         all_embeddings = []
         clean_texts = [self._clean_text(t) for t in texts]
 
-        # Podział dużej listy tekstów na mniejsze paczki (chunks) wg self.batch_size
+        # Split the large list of texts into smaller packs (chunks) according to self.batch_size
         for i in range(0, len(clean_texts), self.batch_size):
             batch = clean_texts[i: i + self.batch_size]
 
@@ -149,24 +160,26 @@ class LocalEmbeddingClient(Embeddings):
 
             logger.debug(f"Wysyłam batch {i // self.batch_size + 1} (rozmiar: {len(batch)} tekstów)")
             batch_embeddings = self._post_with_retry(payload)
+            self.texts_embedded += len(batch)
             all_embeddings.extend(batch_embeddings)
 
         return all_embeddings
 
     def embed_query(self, text: str) -> List[float]:
         """
-        Generuje embedding dla pojedynczego tekstu.
+        Generates an embedding for a single text.
         """
         clean_text = self._clean_text(text)
 
-        # Zabezpieczenie przed pustym tekstem (zwraca same zera dla szybkiej reakcji)
+        # Guard against empty text (returns all zeros for a fast response)
         if clean_text == " ":
             return [0.0] * self.dimensions
 
         payload = {
-            "input": [clean_text],  # Standardowo wysyłamy jako jednoelementowa tablica
+            "input": [clean_text],  # We usually send it as a single-element array
             "model": self.model
         }
 
         embeddings = self._post_with_retry(payload)
+        self.texts_embedded += 1
         return embeddings[0] if embeddings else [0.0] * self.dimensions

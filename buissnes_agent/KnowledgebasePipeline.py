@@ -1,6 +1,9 @@
 import logging
+import os
 import sys
-from typing import Dict, Any, Generator, Tuple, Protocol, List
+import time
+from datetime import datetime
+from typing import Dict, Any, Callable, Generator, Optional, Tuple, Protocol, List
 
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -81,13 +84,48 @@ class SearchKnowledgebase:
             data_loader: DataLoaderInterface,
             embedding_model: str,
             batch_size: int = 50,
-            force_refresh: bool = False
+            force_refresh: bool = False,
+            strategy_name: Optional[str] = None,
+            chunk_size: Optional[int] = None,
+            chunk_overlap: Optional[int] = None,
+            on_document: Optional[Callable] = None,
+            persist_metrics: bool = True,
+            metrics_run_id: Optional[str] = None
     ):
         self.client = client
         self.store = database_store
         self.model = embedding_model
         self.batch_size = batch_size
         self.data_loader = data_loader
+        self._force_refresh = force_refresh
+
+        # Explicit overrides (used by the experiment runner); when None,
+        # the strategy/size/overlap come from the YAML configuration.
+        self.strategy_override = strategy_name
+        self.chunk_size_override = chunk_size
+        self.chunk_overlap_override = chunk_overlap
+
+        # Optional quality hook (evaluation layer):
+        # on_document(object_key, documents_list, processed_chunks) -> dict
+        # returned fields are merged into the per-document record
+        self.on_document = on_document
+
+        # Per-document records are persisted to the metrics DB on every
+        # ingestion (metrics are always on). The experiment runner disables
+        # this (persist_metrics=False) because it persists with its own
+        # experiment_id.
+        self.persist_metrics = persist_metrics
+        self.metrics_run_id = metrics_run_id or (
+            "ingestion_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        )
+
+        # E2 metrics: per-document results (phase timings + cost counters)
+        self.document_results: List[dict] = []
+        # Accumulated storage time in ms (all insert_batch calls)
+        self._storage_ms_total = 0.0
+        # Chunker used for the last processed document (counter access)
+        self.last_chunker = None
+        self.last_strategy_name = None
 
         # ======================================================================
         # PHASE: Verification and Startup
@@ -128,11 +166,59 @@ class SearchKnowledgebase:
                         if key not in doc.metadata or doc.metadata.get(key) is None:
                             doc.metadata[key] = value
 
+                # Counter baselines (for per-document deltas)
+                emb_requests_before = getattr(self.client, "http_requests", 0)
+                emb_texts_before = getattr(self.client, "texts_embedded", 0)
+                strat_before = self._strategy_counters()
+                storage_before = self._storage_ms_total
+
+                doc_start = time.perf_counter()
+
                 # 3. CHUNKING (Transform) - Pass LIST OF DOCUMENTS and file metadata
+                t0 = time.perf_counter()
                 processed_chunks = self._transform_to_chunks(object_key, documents_list, file_metadata)
+                chunking_ms = (time.perf_counter() - t0) * 1000
 
                 # 4. EMBEDDING & BATCHING
+                t0 = time.perf_counter()
                 self._embed_and_queue_batch(processed_chunks, batch_items)
+                embedding_ms = (time.perf_counter() - t0) * 1000
+
+                total_ms = (time.perf_counter() - doc_start) * 1000
+
+                # Quality hook (evaluation layer): computes e.g. coverage /
+                # coherence and returns fields merged into the record
+                extra: dict = {}
+                if self.on_document:
+                    extra = self.on_document(
+                        object_key, documents_list, processed_chunks
+                    ) or {}
+
+                record = {
+                    "source": object_key,
+                    "strategy": self.last_strategy_name,
+                    "num_chunks": len(processed_chunks),
+                    "chunking_ms": round(chunking_ms, 2),
+                    "embedding_ms": round(embedding_ms, 2),
+                    "storage_ms": round(self._storage_ms_total - storage_before, 2),
+                    "total_ms": round(total_ms, 2),
+                    "embedding_http_requests":
+                        getattr(self.client, "http_requests", 0) - emb_requests_before,
+                    "texts_embedded":
+                        getattr(self.client, "texts_embedded", 0) - emb_texts_before,
+                    "llm_calls":
+                        self._strategy_counters()["llm_calls"] - strat_before["llm_calls"],
+                    "fallbacks":
+                        self._strategy_counters()["fallbacks"] - strat_before["fallbacks"],
+                    "timestamp": datetime.now().isoformat(),
+                }
+                record.update(extra)
+                self.document_results.append(record)
+
+                # Metrics are always on: the per-document record
+                # is stored in the metrics database (best-effort, does not block ingestion)
+                if self.persist_metrics:
+                    self._persist_document_record(record)
 
                 files_processed += 1
 
@@ -141,9 +227,56 @@ class SearchKnowledgebase:
                 continue
 
         if batch_items:
+            t0 = time.perf_counter()
             self.store.insert_batch(batch_items)
+            final_flush_ms = (time.perf_counter() - t0) * 1000
+            self._storage_ms_total += final_flush_ms
+            # Attribute the final flush to the last processed document
+            if self.document_results:
+                self.document_results[-1]["storage_ms"] = round(
+                    self.document_results[-1]["storage_ms"] + final_flush_ms, 2)
 
         logger.info("PROCESS COMPLETE. Files processed: %d", files_processed)
+
+    def _strategy_counters(self) -> dict:
+        """Read cost counters from the last used chunking strategy (if any)."""
+        strategy = getattr(getattr(self, "last_chunker", None), "last_strategy", None)
+        return {
+            "llm_calls": getattr(strategy, "llm_calls", 0),
+            "fallbacks": getattr(strategy, "fallbacks", 0),
+        }
+
+    def _persist_document_record(self, record: dict) -> None:
+        """
+        Best-effort save of the per-document record to the metrics database
+        (rag_chunking_metrics). A save error does not abort ingestion.
+        """
+        try:
+            import platform
+            from dataclasses import fields
+
+            try:
+                from buissnes_agent.metrics import ChunkingRunMetrics, get_repository
+            except ImportError:
+                from metrics import ChunkingRunMetrics, get_repository  # type: ignore
+
+            valid = {f.name for f in fields(ChunkingRunMetrics)}
+            data = {k: v for k, v in record.items() if k in valid}
+            data["experiment_id"] = self.metrics_run_id
+            data.setdefault("num_chunks", 0)
+            data.setdefault("timestamp", datetime.now().isoformat())
+            data["batch_size"] = self.batch_size
+            data["force_refresh"] = self._force_refresh
+            data["embedding_model"] = self.model
+            data["llm_model"] = os.getenv("CHAT_MODEL")
+            data["python_version"] = platform.python_version()
+
+            get_repository().insert_chunking_metrics(ChunkingRunMetrics(**data))
+        except Exception as e:
+            logger.warning(
+                "Nie zapisano metryk dokumentu '%s': %s",
+                record.get("source"), e
+            )
 
     def _transform_to_chunks(
             self,
@@ -175,7 +308,12 @@ class SearchKnowledgebase:
             "LOGIC LAYER: LangChainChunker selected. Strategy: %s",
             strategy
         )
-        chunker_engine = LangChainChunker(strategy, chunk_size, chunk_overlap)
+        chunker_engine = LangChainChunker(
+            strategy, chunk_size, chunk_overlap,
+            embedding_client=self.client
+        )
+        self.last_chunker = chunker_engine
+        self.last_strategy_name = strategy
         processed_chunks = chunker_engine.process_content(documents_list)
 
         # Add line numbers to chunks
@@ -204,9 +342,11 @@ class SearchKnowledgebase:
                 "metadata": metadata
             })
 
-            # Check batch size and send
+            # Check batch size and send (timed: part of storage phase)
             if len(batch_items) >= self.batch_size:
+                t0 = time.perf_counter()
                 self.store.insert_batch(batch_items)
+                self._storage_ms_total += (time.perf_counter() - t0) * 1000
                 batch_items.clear()
 
     def _get_chunk_config(self, module_name: str, ext: str) -> tuple[int, int, str]:
@@ -215,11 +355,25 @@ class SearchKnowledgebase:
         Replaces hardcoded match/case.
 
         Logic:
+        0. If an explicit override was provided (experiment runner), use it.
         1. Looks for config at: chunking.strategies.{module_name}.{ext_without_dot}
         2. If not found, looks at: chunking.strategies.{module_name}.def (module fallback)
         3. Fetches parameters, filling gaps with global default values.
         """
         settings = get_settings()
+
+        if self.strategy_override is not None:
+            size = (
+                self.chunk_size_override
+                if self.chunk_size_override is not None
+                else settings.get("chunking.default_size")
+            )
+            overlap = (
+                self.chunk_overlap_override
+                if self.chunk_overlap_override is not None
+                else settings.get("chunking.default_overlap")
+            )
+            return int(size), int(overlap), self.strategy_override
 
         clean_ext = ext.lstrip(".").lower()
         if not clean_ext:

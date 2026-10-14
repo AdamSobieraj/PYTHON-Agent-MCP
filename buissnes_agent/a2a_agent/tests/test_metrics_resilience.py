@@ -1,3 +1,4 @@
+import os
 import unittest
 
 from unittest.mock import patch
@@ -16,7 +17,7 @@ class MetricsResilienceTests(unittest.TestCase):
         rag_metrics.MetricsCollector._instance = None
 
         with (
-            patch.object(rag_metrics, "METRICS_ENABLED", True),
+            patch.dict(os.environ, {"METRICS_STORAGE_TYPE": "postgres"}),
             patch.object(
                 MetricsRepositoryFactory,
                 "_load_postgres_repository_class",
