@@ -1,3 +1,4 @@
+import json
 import os
 import logging
 import psycopg2
@@ -12,6 +13,7 @@ from .models import (
     GenerationMetrics,
     FullRAGMetrics,
     ChunkingRunMetrics,
+    CostMetrics,
     MetricsStats
 )
 
@@ -152,6 +154,7 @@ POSTGRES_SCHEMA = """
                       num_chunks INTEGER NOT NULL, \
                       avg_chunk_len FLOAT, \
                       max_chunk_len INTEGER, \
+                      std_chunk_len FLOAT, \
                       empty_chunks INTEGER, \
                       too_short_chunks INTEGER, \
                       over_limit_chunks INTEGER, \
@@ -173,6 +176,26 @@ POSTGRES_SCHEMA = """
                   CREATE INDEX IF NOT EXISTS idx_chunking_experiment ON rag_chunking_metrics(experiment_id); \
                   CREATE INDEX IF NOT EXISTS idx_chunking_strategy ON rag_chunking_metrics(strategy); \
                   CREATE INDEX IF NOT EXISTS idx_chunking_timestamp ON rag_chunking_metrics(timestamp); \
+
+                  -- Tabela dla metryk kosztów (token usage + cost per model/sekcja)
+                  CREATE TABLE IF NOT EXISTS rag_cost_metrics \
+                  ( \
+                      id UUID PRIMARY KEY DEFAULT gen_random_uuid(), \
+                      model VARCHAR(255) NOT NULL, \
+                      section VARCHAR(64) NOT NULL, \
+                      input_tokens INTEGER NOT NULL DEFAULT 0, \
+                      output_tokens INTEGER NOT NULL DEFAULT 0, \
+                      total_tokens INTEGER NOT NULL DEFAULT 0, \
+                      cost_input FLOAT, \
+                      cost_output FLOAT, \
+                      cost_total FLOAT, \
+                      provider VARCHAR(64), \
+                      metadata JSONB, \
+                      timestamp TIMESTAMP NOT NULL DEFAULT NOW() \
+                  );
+
+                  CREATE INDEX IF NOT EXISTS idx_cost_timestamp ON rag_cost_metrics(timestamp); \
+                  CREATE INDEX IF NOT EXISTS idx_cost_section ON rag_cost_metrics(section); \
                   """
 
 
@@ -387,6 +410,33 @@ class PostgresMetricsRepository(IMetricsRepository):
             logger.error(f"Błąd odczytu metryk: {e}")
             return []
 
+    def get_generation_metrics(
+            self,
+            limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Implementation: get generation metrics"""
+        query = """
+                SELECT id, \
+                       query, \
+                       answer, \
+                       context_length, \
+                       tokens_used, \
+                       latency_ms, \
+                       cost, \
+                       retrieval_id, timestamp
+                FROM rag_generation_metrics
+                ORDER BY timestamp DESC LIMIT %s
+                """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute(query, (limit,))
+                    results = cursor.fetchall()
+                    return [dict(row) for row in results]
+        except Error as e:
+            logger.error(f"Błąd odczytu metryk generation: {e}")
+            return []
+
     def get_aggregated_stats(
             self,
             hours: Optional[int] = 24,
@@ -463,7 +513,7 @@ class PostgresMetricsRepository(IMetricsRepository):
                 (experiment_id, strategy, source, category,
                  chunk_size, chunk_overlap, batch_size, force_refresh,
                  embedding_model, llm_model, python_version,
-                 num_chunks, avg_chunk_len, max_chunk_len,
+                 num_chunks, avg_chunk_len, max_chunk_len, std_chunk_len,
                  empty_chunks, too_short_chunks,
                  over_limit_chunks, over_limit_ratio, coverage, coherence,
                  embedding_http_requests, texts_embedded, llm_calls, fallbacks,
@@ -471,7 +521,7 @@ class PostgresMetricsRepository(IMetricsRepository):
                 VALUES (%(experiment_id)s, %(strategy)s, %(source)s, %(category)s,
                         %(chunk_size)s, %(chunk_overlap)s, %(batch_size)s, %(force_refresh)s,
                         %(embedding_model)s, %(llm_model)s, %(python_version)s,
-                        %(num_chunks)s, %(avg_chunk_len)s, %(max_chunk_len)s,
+                        %(num_chunks)s, %(avg_chunk_len)s, %(max_chunk_len)s, %(std_chunk_len)s,
                         %(empty_chunks)s, %(too_short_chunks)s,
                         %(over_limit_chunks)s, %(over_limit_ratio)s, %(coverage)s, %(coherence)s,
                         %(embedding_http_requests)s, %(texts_embedded)s, %(llm_calls)s, %(fallbacks)s,
@@ -500,7 +550,7 @@ class PostgresMetricsRepository(IMetricsRepository):
                 SELECT id, experiment_id, strategy, source, category,
                        chunk_size, chunk_overlap, batch_size, force_refresh,
                        embedding_model, llm_model, python_version,
-                       num_chunks, avg_chunk_len, max_chunk_len,
+                       num_chunks, avg_chunk_len, max_chunk_len, std_chunk_len,
                        empty_chunks, too_short_chunks,
                        over_limit_chunks, over_limit_ratio, coverage, coherence,
                        embedding_http_requests, texts_embedded, llm_calls, fallbacks,
@@ -529,6 +579,136 @@ class PostgresMetricsRepository(IMetricsRepository):
                     return [dict(row) for row in results]
         except Error as e:
             logger.error(f"Błąd odczytu metryk chunkingu: {e}")
+            return []
+
+    def insert_chunking_metrics_manual(self, metrics: ChunkingRunMetrics) -> Optional[int]:
+        """Implementation: insert manual chunking metrics (E1-E4 experiments)"""
+        query = """
+                INSERT INTO rag_chunking_metrics_manual
+                (experiment_id, strategy, source, category,
+                 chunk_size, chunk_overlap, batch_size, force_refresh,
+                 embedding_model, llm_model, python_version,
+                 num_chunks, avg_chunk_len, max_chunk_len, std_chunk_len,
+                 empty_chunks, too_short_chunks,
+                 over_limit_chunks, over_limit_ratio, coverage, coherence,
+                 embedding_http_requests, texts_embedded, llm_calls, fallbacks,
+                 chunking_ms, embedding_ms, storage_ms, total_ms, timestamp)
+                VALUES (%(experiment_id)s, %(strategy)s, %(source)s, %(category)s,
+                        %(chunk_size)s, %(chunk_overlap)s, %(batch_size)s, %(force_refresh)s,
+                        %(embedding_model)s, %(llm_model)s, %(python_version)s,
+                        %(num_chunks)s, %(avg_chunk_len)s, %(max_chunk_len)s, %(std_chunk_len)s,
+                        %(empty_chunks)s, %(too_short_chunks)s,
+                        %(over_limit_chunks)s, %(over_limit_ratio)s, %(coverage)s, %(coherence)s,
+                        %(embedding_http_requests)s, %(texts_embedded)s, %(llm_calls)s, %(fallbacks)s,
+                        %(chunking_ms)s, %(embedding_ms)s, %(storage_ms)s, %(total_ms)s,
+                        %(timestamp)s) RETURNING id;
+                """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, metrics.to_dict())
+                    record_id = cursor.fetchone()[0]
+                    logger.debug(
+                        f"Metryki manualne chunkingu zapisane: ID={record_id} "
+                        f"(exp={metrics.experiment_id}, strategy={metrics.strategy})"
+                    )
+                    return record_id
+        except Error as e:
+            logger.error(f"Błąd zapisu manualnych metryk chunkingu: {e}")
+            return None
+
+    def get_chunking_metrics_manual(
+            self,
+            limit: int = 100,
+            experiment_id: Optional[str] = None,
+            strategy: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Implementation: get manual chunking metrics (E1-E4 experiments)"""
+        query = """
+                SELECT * FROM rag_chunking_metrics_manual
+                WHERE 1=1
+                """
+        params: List[Any] = []
+
+        if experiment_id:
+            query += " AND experiment_id = %s"
+            params.append(experiment_id)
+
+        if strategy:
+            query += " AND strategy = %s"
+            params.append(strategy)
+
+        query += " ORDER BY timestamp DESC LIMIT %s"
+        params.append(limit)
+
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute(query, params)
+                    results = cursor.fetchall()
+                    return [dict(row) for row in results]
+        except Error as e:
+            logger.error(f"Błąd odczytu manualnych metryk chunkingu: {e}")
+            return []
+
+    def insert_cost_metrics(self, metrics: CostMetrics) -> Optional[int]:
+        """Implementation: insert cost metrics (token usage + cost)"""
+        query = """
+                INSERT INTO rag_cost_metrics
+                (model, section, input_tokens, output_tokens, total_tokens,
+                 cost_input, cost_output, cost_total, provider, metadata, timestamp)
+                VALUES (%(model)s, %(section)s, %(input_tokens)s, %(output_tokens)s,
+                        %(total_tokens)s, %(cost_input)s, %(cost_output)s, %(cost_total)s,
+                        %(provider)s, %(metadata)s, %(timestamp)s) RETURNING id;
+                """
+        data = metrics.to_dict()
+        data["metadata"] = json.dumps(data["metadata"]) if data["metadata"] else None
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, data)
+                    record_id = cursor.fetchone()[0]
+                    logger.debug(
+                        f"Metryki kosztów zapisane: ID={record_id} "
+                        f"(section={metrics.section}, model={metrics.model})"
+                    )
+                    return record_id
+        except Error as e:
+            logger.error(f"Błąd zapisu metryk kosztów: {e}")
+            return None
+
+    def get_cost_metrics(
+            self,
+            limit: int = 100,
+            section: Optional[str] = None,
+            model: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Implementation: get cost metrics"""
+        query = """
+                SELECT * FROM rag_cost_metrics
+                WHERE 1=1
+                """
+        params: List[Any] = []
+
+        if section:
+            query += " AND section = %s"
+            params.append(section)
+
+        if model:
+            query += " AND model = %s"
+            params.append(model)
+
+        query += " ORDER BY timestamp DESC LIMIT %s"
+        params.append(limit)
+
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute(query, params)
+                    results = cursor.fetchall()
+                    return [dict(row) for row in results]
+        except Error as e:
+            logger.error(f"Błąd odczytu metryk kosztów: {e}")
             return []
 
     def close(self) -> None:

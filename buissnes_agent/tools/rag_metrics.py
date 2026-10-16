@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Optional, List
@@ -6,6 +7,7 @@ from typing import Optional, List
 try:
     from buissnes_agent.metrics import (
         ChunkingRunMetrics,
+        CostMetrics,
         FullRAGMetrics,
         GenerationMetrics,
         IMetricsRepository,
@@ -15,6 +17,7 @@ try:
 except ImportError:
     from metrics import (  # type: ignore
         ChunkingRunMetrics,
+        CostMetrics,
         FullRAGMetrics,
         GenerationMetrics,
         IMetricsRepository,
@@ -306,3 +309,87 @@ def log_full_rag_for_turn(query: str,
 
     except Exception as e:
         logger.error(f"Błąd zapisu metryk tury RAG: {e}")
+
+
+# ==============================================================================
+# COST USAGE (token usage + cost per model/section -> rag_cost_metrics)
+# ==============================================================================
+#
+# Prices are read from the COST section in .env (USD per 1M tokens):
+#     COST_INPUT_PER_MTOKEN / COST_OUTPUT_PER_MTOKEN
+#
+# Sections:
+#     embedding          - LocalEmbeddingClient (input tokens only)
+#     chunking_agentic   - LLM calls in NewAgenticStrategy
+#     agent_generation   - final answer generation (AnalysisAgent)
+
+
+def _price_from_env(name: str) -> float:
+    """Read a price (USD per 1M tokens) from the COST section in .env."""
+    try:
+        return float(os.getenv(name, "0.0"))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def estimate_tokens(text: str) -> int:
+    """
+    Rough token estimate (chars/4) for use when the provider does not
+    report usage. Industry-standard heuristic - good enough for costing.
+    """
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+def log_cost_usage(
+    model: str,
+    section: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    provider: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    estimated: bool = False,
+) -> None:
+    """
+    Log token usage + cost for one model usage in one system section.
+
+    Costs (USD) are ALWAYS computed from the COST section in .env
+    (COST_INPUT_PER_MTOKEN / COST_OUTPUT_PER_MTOKEN) - also when the
+    token counts are estimated (estimated=True, stored in metadata).
+    Never raises - metrics must not break the pipeline.
+    Rows land in the rag_cost_metrics table.
+    """
+    try:
+        input_tokens = int(input_tokens or 0)
+        output_tokens = int(output_tokens or 0)
+        if input_tokens <= 0 and output_tokens <= 0:
+            return  # nothing to measure and nothing to estimate
+
+        if estimated:
+            metadata = dict(metadata or {})
+            metadata["estimated"] = True
+
+        cost_in = round(input_tokens / 1_000_000.0 * _price_from_env("COST_INPUT_PER_MTOKEN"), 8)
+        cost_out = round(output_tokens / 1_000_000.0 * _price_from_env("COST_OUTPUT_PER_MTOKEN"), 8)
+
+        metrics = CostMetrics(
+            model=model or "unknown",
+            section=section,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+            cost_input=cost_in,
+            cost_output=cost_out,
+            cost_total=round(cost_in + cost_out, 8),
+            provider=provider,
+            metadata=metadata,
+        )
+        repo = get_repository()
+        repo.insert_cost_metrics(metrics)
+        logger.debug(
+            "Cost usage zapisane: section=%s model=%s tokens=%d/%d estimated=%s",
+            section, model, input_tokens, output_tokens, estimated,
+        )
+    except Exception as e:
+        logger.warning(f"Zapis cost usage nie powiodl sie (non-fatal): {e}")

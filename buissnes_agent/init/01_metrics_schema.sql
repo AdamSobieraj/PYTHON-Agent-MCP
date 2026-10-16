@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS rag_chunking_metrics (
     num_chunks INTEGER NOT NULL,
     avg_chunk_len FLOAT,
     max_chunk_len INTEGER,
+    std_chunk_len FLOAT,
     empty_chunks INTEGER,
     too_short_chunks INTEGER,
     over_limit_chunks INTEGER,

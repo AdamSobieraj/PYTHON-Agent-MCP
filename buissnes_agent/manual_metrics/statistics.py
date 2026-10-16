@@ -29,6 +29,73 @@ def std(values: Sequence[float]) -> float:
     return math.sqrt(sum((x - mu) ** 2 for x in values) / (len(values) - 1))
 
 
+def percentile(values: Sequence[float], p: float) -> float:
+    """
+    Percentile with linear interpolation (p in [0, 1]).
+    Chapter 4 time metrics: p50 / p95 / p99 of a series.
+    """
+    if not values:
+        return 0.0
+    data = sorted(float(v) for v in values)
+    if len(data) == 1:
+        return data[0]
+    k = (len(data) - 1) * p
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return data[int(k)]
+    return data[f] * (c - k) + data[c] * (k - f)
+
+
+def latency_percentiles(values: Sequence[float]) -> Dict[str, float]:
+    """n / mean / p50 / p95 / p99 for one latency series."""
+    if not values:
+        return {"n": 0, "mean": 0.0, "p50": 0.0, "p95": 0.0, "p99": 0.0}
+    return {
+        "n": len(values),
+        "mean": round(mean(values), 2),
+        "p50": round(percentile(values, 0.50), 2),
+        "p95": round(percentile(values, 0.95), 2),
+        "p99": round(percentile(values, 0.99), 2),
+    }
+
+
+def latency_table(
+        records: List[Dict[str, Any]],
+        fields: Sequence[str],
+        group_key: str = "strategy",
+        group_all: str = "ALL",
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Latency percentiles per group (and overall).
+
+    records: rows carrying the latency fields (ms)
+    fields: latency field names (e.g. chunking_ms, total_ms)
+    Returns: {group_label: {field: {n, mean, p50, p95, p99}}}
+    """
+    groups: List[Tuple[str, List[Dict[str, Any]]]] = [
+        (group_all, records)
+    ]
+    labels = sorted(
+        {r.get(group_key) for r in records if r.get(group_key)}
+    )
+    for label in labels:
+        groups.append(
+            (str(label), [r for r in records if r.get(group_key) == label])
+        )
+
+    table: Dict[str, Dict[str, Any]] = {}
+    for label, subset in groups:
+        row: Dict[str, Any] = {group_key: label}
+        for field in fields:
+            values = [
+                float(r[field]) for r in subset if r.get(field) is not None
+            ]
+            row[field] = latency_percentiles(values)
+        table[label] = row
+    return table
+
+
 def bootstrap_ci(
         values: Sequence[float],
         ci: float = 0.95,
@@ -115,7 +182,7 @@ def summary_table(
     Per-strategy metric summary + Wilcoxon comparisons.
 
     Args:
-        records: records from get_chunking_metrics()
+        records: records from get_chunking_metrics_manual()
         metric: metric name (key in the record, e.g. "coherence")
         ci: bootstrap confidence level (default 0.95)
         n_boot: number of bootstrap iterations

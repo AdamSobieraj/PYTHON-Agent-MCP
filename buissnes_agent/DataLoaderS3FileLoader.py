@@ -6,7 +6,10 @@ from typing import Any, Dict, Generator, List, Tuple
 
 from langchain_core.documents import Document
 
-from DataLoaderS3Service import DataLoaderS3Service
+try:
+    from buissnes_agent.DataLoaderS3Service import DataLoaderS3Service
+except ImportError:
+    from DataLoaderS3Service import DataLoaderS3Service  # type: ignore
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)

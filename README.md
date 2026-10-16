@@ -236,10 +236,12 @@ Metrics are collected **always** (no enable flag). Requirement: an available sto
 
 | Table | Content | Written by |
 |---|---|---|
-| `rag_chunking_metrics` | ingestion (per document) + experiments E1–E4 | the `SearchKnowledgebase` pipeline + the runner |
+| `rag_chunking_metrics` | ingestion (per document) | the `SearchKnowledgebase` pipeline (production path) |
+| `rag_chunking_metrics_manual` | experiments E1–E4 (per strategy/parameter run) | `manual_metrics` (runner + thesis pipeline) |
 | `rag_retrieval_metrics` | knowledge-base queries (scores, latency) | the MCP server (`tool_iso_rag` → `log_retrieval`) |
 | `rag_generation_metrics` | agent answers (latency, context) | Stack A (client script) and Stack B (`agent_executor`) |
 | `rag_full_metrics` | a consistent turn set: retrieval + generation + total latency | `log_full_rag_for_turn` (both stacks) |
+| `rag_cost_metrics` | token usage + cost (USD) per model/section | `log_cost_usage` hooks (embedding, chunking_agentic, agent_generation) |
 
 **One RAG turn flow (1 question = a consistent set of 3 rows):**
 1. the MCP server writes the retrieval row,
@@ -265,6 +267,33 @@ Metrics are collected **always** (no enable flag). Requirement: an available sto
 
 ---
 
+## Cost Metrics (token usage + cost per model/section)
+
+Token usage and costs are written **automatically** to the
+`rag_cost_metrics` table (Postgres `rag_metrics` DB) — no flags,
+metrics are always active.
+
+*   **Table**: `rag_cost_metrics` — `model`, `section`,
+    `input_tokens`, `output_tokens`, `total_tokens`,
+    `cost_input`, `cost_output`, `cost_total` (USD), `provider`, `metadata`.
+*   **Sections**:
+    *   `embedding` — `LocalEmbeddingClient` (input tokens only, from the
+        `usage` field of the embeddings API response),
+    *   `chunking_agentic` — LLM calls in `NewAgenticStrategy`
+        (`usage_metadata` after `llm.invoke`),
+    *   `agent_generation` — final answer generation in `AnalysisAgent`
+        (sum of `usage_metadata` over the turn's messages).
+*   **Pricing** — the `COST` section in `.env` (USD per 1M tokens):
+    `COST_INPUT_PER_MTOKEN` / `COST_OUTPUT_PER_MTOKEN` — the cost is
+    **always** computed from these variables, even when the token
+    counts are estimated.
+*   **Estimation fallback** — when the provider reports no usage
+    (e.g. local LM Studio returns `prompt_tokens: 0`), the tokens are
+    estimated (chars/4 heuristic) and the row carries
+    `metadata.estimated = true`, so real and estimated rows can be
+    separated in analysis.
+*   Failures never break the pipeline (non-fatal logging).
+
 ## Experiments (E1–E4)
 
 Comparison of chunking strategies following the research plan (the "Methodology" chapter):
@@ -276,26 +305,40 @@ Comparison of chunking strategies following the research plan (the "Methodology"
 | **E3** | `size` × `overlap` parameter ablation |
 | **E4** | resilience: simulated LLM failure (agentic → fallback) and embedding endpoint failure (semantic) |
 
-**Running:**
+Experiments are **manually-run** (opt-in research data path, never triggered by the normal app flow) — the tools live in `buissnes_agent/manual_metrics/`.
+
+**Running experiments:**
 ```bash
-python -m buissnes_agent.evaluation.run_experiments --exp all
-python -m buissnes_agent.evaluation.run_experiments --exp E1
-python -m buissnes_agent.evaluation.run_experiments --exp E4
+python -m buissnes_agent.manual_metrics.run_experiments --exp all
+python -m buissnes_agent.manual_metrics.run_experiments --exp E1
+python -m buissnes_agent.manual_metrics.run_experiments --exp E4
 # overriding dataset and config:
-python -m buissnes_agent.evaluation.run_experiments --exp E3 --dataset ./dataset --config config/experiments.yaml
+python -m buissnes_agent.manual_metrics.run_experiments --exp E3 --dataset ./dataset --config config/experiments.yaml
 ```
 
+**Thesis pipeline (experiments → statistics → export, in one go):**
+```bash
+python -m buissnes_agent.manual_metrics.thesis_pipeline
+python -m buissnes_agent.manual_metrics.thesis_pipeline --exp E1,E3 --out results/run1
+python -m buissnes_agent.manual_metrics.thesis_pipeline --skip-experiments   # re-analyze existing DB rows
+```
+Writes per-metric `*_summary.csv` + `*_table.tex` (LaTeX, for the results chapter), **latency percentiles p50/p95/p99** (`latency_documents.csv` + `latency_documents_table.tex` for the experiment runs; `query_retrieval_latency_table.tex` / `query_generation_latency_table.tex` once RAG query series exist) and a `run_log.json` into the output directory.
+
 *   Configuration: `config/experiments.yaml` (dataset, strategies, E3 grid, E4 failures).
-*   Every run goes through the full pipeline (`SearchKnowledgebase`) and writes per-document `ChunkingRunMetrics` records to the metrics DB (Qdrant collections: `exp_<experiment_id>`, or `InMemoryStore` when `QDRANT_API` is not set).
-*   Results: `SELECT * FROM rag_chunking_metrics WHERE experiment_id = ...;`
-*   Statistics (the "Statistical Analysis" section): `buissnes_agent/evaluation/statistics.py` — `mean`, `std`, `bootstrap_ci` (95%), `wilcoxon_test`, `summary_table`, `export_csv`, `to_latex_table`.
+*   **Dataset source** (selected in `.env`):
+    *   `MANUAL_METRICS_SOURCE=local` (default) — documents from `dataset_path` (YAML),
+    *   `MANUAL_METRICS_SOURCE=s3` — documents from the bucket
+        `MANUAL_METRICS_S3_BUCKET` (fallback: `S3_BUCKET`), optional prefix
+        `MANUAL_METRICS_S3_PREFIX` (S3 connection: `S3_ENDPOINT`/`S3_AKID`/`S3_SK`).
+*   Every run goes through the full pipeline (`SearchKnowledgebase`) and writes per-document `ChunkingRunMetrics` records to the **`rag_chunking_metrics_manual`** table (a dedicated table — production ingestion keeps `rag_chunking_metrics`; Qdrant collections: `exp_<experiment_id>`, or `InMemoryStore` when `QDRANT_API` is not set).
+*   Results: `SELECT * FROM rag_chunking_metrics_manual WHERE experiment_id = ...;`
+*   Statistics (the "Statistical Analysis" section): `buissnes_agent/manual_metrics/statistics.py` — `mean`, `std`, `bootstrap_ci` (95%), `wilcoxon_test`, `summary_table`, `export_csv`, `to_latex_table`.
 
 ---
 
 ## How to Run
 
 The system supports two agent stacks (both use the same MCP server and the same metrics database).
-Detailed guide: `opcje.txt`.
 
 ### Stack A — MCP client with a LangGraph agent (simplest)
 
@@ -381,9 +424,14 @@ buissnes_agent/
 │   ├── repository_factory.py     # storage selection (METRICS_STORAGE_TYPE)
 │   └── init_metrics_db.py        # schema initialization (CLI)
 ├── evaluation/
-│   ├── chunk_metrics.py          # chunking quality metrics (E1)
+│   └── chunk_metrics.py          # chunking quality metrics (runtime, automatic)
+├── manual_metrics/               # manually-run metrics tools (opt-in research path)
+│   ├── run_experiments.py        # E1–E4 runner (CLI: --exp all|E1|E2|E3|E4)
 │   ├── statistics.py             # mean/std/bootstrap CI/Wilcoxon + CSV/LaTeX export
-│   └── run_experiments.py        # E1–E4 runner (CLI: --exp all|E1|E2|E3|E4)
+│   ├── thesis_pipeline.py        # experiments -> statistics -> export in one go
+│   ├── maintain_list_collections.py  # list Qdrant collections (name/status/points/dim)
+│   └── maintain_collection_cleanup.py  # delete experiment collections (prefix exp_,
+│                                       #   --dry-run / --yes / --prefix)
 ├── tools/
 │   ├── rag_metrics.py            # MetricsCollector (log_retrieval/log_generation/log_full_rag/
 │   │                             #   log_chunking) + log_full_rag_for_turn (Stack A/B turns)
@@ -402,5 +450,4 @@ testscripts/
 ├── test_script_client_for_MCP.py # Stack A: LangGraph agent + MCP client (http/sse/stdio)
 └── ...                           # strategy and metrics verification scripts
 init/01_metrics_schema.sql        # metrics DB DDL (auto-init via compose)
-opcje.txt                         # guide: Stack B (A2A) startup step by step
 ```

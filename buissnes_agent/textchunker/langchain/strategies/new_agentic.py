@@ -142,7 +142,9 @@ class NewAgenticStrategy(ChunkingStrategy):
         """Asks the LLM for a sentence partition of the window (with fallback)."""
         self.llm_calls += 1
         try:
-            response = self.llm.invoke(self._build_prompt(window))
+            prompt = self._build_prompt(window)
+            response = self.llm.invoke(prompt)
+            self._log_llm_usage(response, prompt)
             content = response.content if hasattr(response, "content") else str(response)
             parsed = self._extract_json(content)
             numbers = self._validate_partition(parsed, len(window))
@@ -160,6 +162,49 @@ class NewAgenticStrategy(ChunkingStrategy):
                 "falling back to sentence packing for %d sentence(s).", e, len(window)
             )
         return self._pack_units(window)
+
+    def _log_llm_usage(self, response, prompt) -> None:
+        """
+        Cost usage hook: report token usage of the LLM call
+        (section=chunking_agentic). When the model reports nothing,
+        the tokens are estimated from the prompt/response texts.
+        Never raises.
+        """
+        try:
+            usage = getattr(response, "usage_metadata", None) or {}
+            if usage.get("input_tokens") is None:
+                token_usage = (getattr(response, "additional_kwargs", {}) or {}).get(
+                    "token_usage", {}
+                )
+                usage = {
+                    "input_tokens": token_usage.get("prompt_tokens", 0),
+                    "output_tokens": token_usage.get("completion_tokens", 0),
+                }
+            input_tokens = int(usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("output_tokens") or 0)
+            estimated = False
+            if not input_tokens and not output_tokens:
+                from buissnes_agent.tools.rag_metrics import estimate_tokens
+
+                content = response.content if hasattr(response, "content") else str(response)
+                input_tokens = sum(
+                    estimate_tokens(str(m.get("content", ""))) for m in prompt
+                )
+                output_tokens = estimate_tokens(content)
+                estimated = True
+            if input_tokens or output_tokens:
+                from buissnes_agent.tools.rag_metrics import log_cost_usage
+
+                log_cost_usage(
+                    model=os.getenv("CHAT_MODEL") or os.getenv("LLM_MODEL") or "unknown",
+                    section="chunking_agentic",
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    provider=os.getenv("CHAT_PROVIDER", "local"),
+                    estimated=estimated,
+                )
+        except Exception:
+            pass
 
     def _build_prompt(self, window: List[str]) -> List[dict]:
         numbered = "\n".join(f"{i + 1}. {u.strip()}" for i, u in enumerate(window))

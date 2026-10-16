@@ -3,6 +3,7 @@ from .models import (
     GenerationMetrics,
     FullRAGMetrics,
     ChunkingRunMetrics,
+    CostMetrics,
     MetricsStats
 )
 
@@ -25,6 +26,7 @@ __all__ = [
     "GenerationMetrics",
     "FullRAGMetrics",
     "ChunkingRunMetrics",
+    "CostMetrics",
     "MetricsStats",
     "IMetricsRepository",
     "MetricsRepositoryFactory",

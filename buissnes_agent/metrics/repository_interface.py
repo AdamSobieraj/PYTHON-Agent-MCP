@@ -5,6 +5,7 @@ from .models import (
     GenerationMetrics,
     FullRAGMetrics,
     ChunkingRunMetrics,
+    CostMetrics,
     MetricsStats
 )
 
@@ -136,6 +137,69 @@ class IMetricsRepository(ABC):
         pass
 
     @abstractmethod
+    def insert_chunking_metrics_manual(self, metrics: ChunkingRunMetrics) -> Optional[int]:
+        """
+        Insert manual chunking metrics (experiments E1-E4) into the
+        rag_chunking_metrics_manual table (separate from production rows)
+
+        Args:
+            metrics: ChunkingRunMetrics object to insert
+        """
+        raise NotImplementedError
+
+    def get_chunking_metrics_manual(
+            self,
+            limit: int = 100,
+            experiment_id: Optional[str] = None,
+            strategy: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get manual chunking metrics (experiments E1-E4)
+
+        Args:
+            limit: Maximum number of records
+            experiment_id: Filter by experiment (optional)
+            strategy: Filter by strategy (optional)
+        """
+        raise NotImplementedError
+
+    def insert_cost_metrics(self, metrics: CostMetrics) -> Optional[int]:
+        """
+        Insert cost metrics (token usage + cost per model/section)
+
+        Args:
+            metrics: CostMetrics object to insert
+        """
+        raise NotImplementedError
+
+    def get_cost_metrics(
+            self,
+            limit: int = 100,
+            section: Optional[str] = None,
+            model: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get cost metrics
+
+        Args:
+            limit: Maximum number of records
+            section: Filter by section (optional)
+            model: Filter by model (optional)
+        """
+        raise NotImplementedError
+
+    def get_generation_metrics(
+            self,
+            limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Get generation metrics
+
+        Args:
+            limit: Maximum number of records
+        """
+        raise NotImplementedError
+
     def get_chunking_metrics(
             self,
             limit: int = 100,

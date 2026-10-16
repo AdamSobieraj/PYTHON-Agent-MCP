@@ -9,12 +9,19 @@ E4: system resilience to failures (LLM / embedding endpoint).
 Each run goes through the full SearchKnowledgebase pipeline
 (load -> chunk -> embed -> store); per-document results
 (quality + cost + time) are saved to the metrics database
-(ChunkingRunMetrics) via get_repository().
+(ChunkingRunMetrics) via get_repository().insert_chunking_metrics_manual()
+(wiersze manualne trafiaja do tabeli rag_chunking_metrics_manual).
+
+Dataset source is selected in .env:
+    MANUAL_METRICS_SOURCE=local   (default; dataset_path directory)
+    MANUAL_METRICS_SOURCE=s3      (bucket: MANUAL_METRICS_S3_BUCKET,
+                                   fallback S3_BUCKET;
+                                   optional MANUAL_METRICS_S3_PREFIX)
 
 Usage:
-    python -m buissnes_agent.evaluation.run_experiments --exp all
-    python -m buissnes_agent.evaluation.run_experiments --exp E1
-    python -m buissnes_agent.evaluation.run_experiments --exp E4
+    python -m buissnes_agent.manual_metrics.run_experiments --exp all
+    python -m buissnes_agent.manual_metrics.run_experiments --exp E1
+    python -m buissnes_agent.manual_metrics.run_experiments --exp E4
 """
 import argparse
 import json
@@ -27,6 +34,14 @@ from datetime import datetime
 from types import MethodType
 from typing import Any, Dict, List, Optional
 
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+# Allow both invocation styles: as a module (python -m ...) and
+# directly (python buissnes_agent/manual_metrics/run_experiments.py)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import yaml
 from dotenv import load_dotenv
 
@@ -37,11 +52,7 @@ from buissnes_agent.textchunker.langchain.strategies.new_agentic import (
     NewAgenticStrategy,
 )
 
-from .chunk_metrics import compute_chunk_metrics
-
-PROJECT_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
+from buissnes_agent.evaluation.chunk_metrics import compute_chunk_metrics
 
 
 # ==============================================================================
@@ -182,6 +193,42 @@ def _to_run_metrics(record: Dict[str, Any], cfg: Dict[str, Any],
     return ChunkingRunMetrics(**data)
 
 
+def data_source() -> str:
+    """Dataset source for experiments: 'local' or 's3' (MANUAL_METRICS_SOURCE)."""
+    source = os.getenv("MANUAL_METRICS_SOURCE", "local").strip().lower()
+    return source if source in ("local", "s3") else "local"
+
+
+def _make_loader(source: str, dataset_path: str):
+    """Build the data loader according to the configured source.
+
+    local: DataLoaderLocalFileLoader over dataset_path (default),
+    s3:    DataLoaderS3FileLoader over MANUAL_METRICS_S3_BUCKET
+           (fallback: S3_BUCKET) with an optional MANUAL_METRICS_S3_PREFIX.
+    """
+    if source == "s3":
+        from buissnes_agent.DataLoaderS3FileLoader import DataLoaderS3FileLoader
+
+        bucket = os.getenv("MANUAL_METRICS_S3_BUCKET") or os.getenv(
+            "S3_BUCKET", ""
+        )
+        if not bucket:
+            raise ValueError(
+                "MANUAL_METRICS_SOURCE=s3 requires a bucket: set "
+                "MANUAL_METRICS_S3_BUCKET (or S3_BUCKET) in .env"
+            )
+        prefix = os.getenv("MANUAL_METRICS_S3_PREFIX", "")
+        return DataLoaderS3FileLoader(bucket_name=bucket, prefix=prefix)
+
+    from buissnes_agent.DataLoaderLocalFileLoader import (
+        DataLoaderLocalFileLoader,
+    )
+
+    if not os.path.isabs(dataset_path):
+        dataset_path = os.path.join(PROJECT_ROOT, dataset_path)
+    return DataLoaderLocalFileLoader(directory=dataset_path)
+
+
 def _run_one(
         cfg: Dict[str, Any],
         dataset_path: str,
@@ -195,12 +242,8 @@ def _run_one(
     One experiment run: full pipeline + saving records
     to the metrics database + summary.
     """
-    from buissnes_agent.DataLoaderLocalFileLoader import DataLoaderLocalFileLoader
-
-    if not os.path.isabs(dataset_path):
-        dataset_path = os.path.join(PROJECT_ROOT, dataset_path)
-
-    loader = DataLoaderLocalFileLoader(directory=dataset_path)
+    source = data_source()
+    loader = _make_loader(source, dataset_path)
     total_docs = sum(1 for _ in loader.list_objects())
 
     client = LocalEmbeddingClient()
@@ -237,7 +280,9 @@ def _run_one(
         run_metrics = _to_run_metrics(
             record, cfg, experiment_id, strategy
         )
-        if repository.insert_chunking_metrics(run_metrics):
+        # Manual metrics go to the dedicated rag_chunking_metrics_manual
+        # table (production ingestion keeps rag_chunking_metrics)
+        if repository.insert_chunking_metrics_manual(run_metrics):
             saved += 1
 
     processed = len(kb.document_results)
@@ -379,7 +424,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     names = list(RUNNERS) if args.exp == "all" else [args.exp]
-    print(f"= EKSPERYMENTY: {', '.join(names)} | dataset: {dataset_path} =")
+    print(
+        f"= EKSPERYMENTY: {', '.join(names)} | "
+        f"source: {data_source()} | dataset: {dataset_path} ="
+    )
 
     for name in names:
         print(f"\n=== {name} ===")

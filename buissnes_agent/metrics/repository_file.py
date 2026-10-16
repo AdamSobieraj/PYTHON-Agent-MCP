@@ -10,6 +10,7 @@ from .models import (
     GenerationMetrics,
     FullRAGMetrics,
     ChunkingRunMetrics,
+    CostMetrics,
     MetricsStats
 )
 
@@ -194,8 +195,9 @@ class FileMetricsRepository(IMetricsRepository):
                         continue
                     data = json.loads(line)
                     # File shared with other metric types -
-                    # fetch only chunking records
-                    if "experiment_id" not in data:
+                    # fetch only production chunking records
+                    # (manual rows carry the "manual" marker)
+                    if "experiment_id" not in data or data.get("manual"):
                         continue
                     if experiment_id and data.get("experiment_id") != experiment_id:
                         continue
@@ -207,6 +209,118 @@ class FileMetricsRepository(IMetricsRepository):
             return []
         except Exception as e:
             logger.error(f"Błąd odczytu metryk chunking: {e}")
+            return []
+
+        records.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return records[:limit]
+
+    def insert_chunking_metrics_manual(self, metrics: ChunkingRunMetrics) -> Optional[int]:
+        """Implementation: append manual chunking metrics to the JSONL file"""
+        try:
+            with open(self.file_path, "a", encoding="utf-8") as f:
+                # "manual" marker separates manual rows from production rows
+                f.write(json.dumps({**metrics.to_dict(), "manual": True}) + "\n")
+            return int(datetime.now().timestamp() * 1000)
+        except Exception as e:
+            logger.error(f"Błąd zapisu manualnych metryk chunkingu: {e}")
+            return None
+
+    def get_chunking_metrics_manual(
+            self,
+            limit: int = 100,
+            experiment_id: Optional[str] = None,
+            strategy: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Implementation: read manual chunking metrics with filtering"""
+        records: List[Dict[str, Any]] = []
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    if "experiment_id" not in data or not data.get("manual"):
+                        continue
+                    if experiment_id and data.get("experiment_id") != experiment_id:
+                        continue
+                    if strategy and data.get("strategy") != strategy:
+                        continue
+                    records.append(data)
+        except FileNotFoundError:
+            logger.warning(f"Plik metryk nie istnieje: {self.file_path}")
+            return []
+        except Exception as e:
+            logger.error(f"Błąd odczytu manualnych metryk chunkingu: {e}")
+            return []
+
+        records.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return records[:limit]
+
+    def insert_cost_metrics(self, metrics: CostMetrics) -> Optional[int]:
+        """Implementation: append cost metrics to the JSONL file"""
+        try:
+            with open(self.file_path, "a", encoding="utf-8") as f:
+                f.write(metrics.to_json() + "\n")
+            return int(datetime.now().timestamp() * 1000)
+        except Exception as e:
+            logger.error(f"Błąd zapisu metryk kosztów: {e}")
+            return None
+
+    def get_generation_metrics(
+            self,
+            limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Implementation: read generation metrics from the JSONL file"""
+        records: List[Dict[str, Any]] = []
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    # File shared with other metric types -
+                    # fetch only generation records
+                    if "context_length" not in data:
+                        continue
+                    records.append(data)
+        except FileNotFoundError:
+            logger.warning(f"Plik metryk nie istnieje: {self.file_path}")
+            return []
+        except Exception as e:
+            logger.error(f"Błąd odczytu metryk generation: {e}")
+            return []
+
+        records.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return records[:limit]
+
+    def get_cost_metrics(
+            self,
+            limit: int = 100,
+            section: Optional[str] = None,
+            model: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Implementation: read cost metrics with filtering"""
+        records: List[Dict[str, Any]] = []
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    # File shared with other metric types -
+                    # fetch only cost records
+                    if "section" not in data:
+                        continue
+                    if section and data.get("section") != section:
+                        continue
+                    if model and data.get("model") != model:
+                        continue
+                    records.append(data)
+        except FileNotFoundError:
+            logger.warning(f"Plik metryk nie istnieje: {self.file_path}")
+            return []
+        except Exception as e:
+            logger.error(f"Błąd odczytu metryk kosztów: {e}")
             return []
 
         records.sort(key=lambda x: x.get("timestamp", ""), reverse=True)

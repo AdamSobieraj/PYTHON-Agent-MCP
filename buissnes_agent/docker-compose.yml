@@ -51,7 +51,9 @@ services:
     environment:
       PGPASSWORD: postgres_metrics_password
     entrypoint: ["psql", "-h", "postgres-metrics", "-U", "postgres", "-d", "rag_metrics",
-                 "-v", "ON_ERROR_STOP=1", "-f", "/init/01_metrics_schema.sql"]
+                 "-v", "ON_ERROR_STOP=1", "-f", "/init/01_metrics_schema.sql",
+                 "-f", "/init/02_cost_metrics_schema.sql",
+                 "-f", "/init/03_chunking_metrics_manual_schema.sql"]
     restart: "no"
     volumes:
       - ./init:/init:ro

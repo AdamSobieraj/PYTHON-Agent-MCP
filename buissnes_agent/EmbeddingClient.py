@@ -104,6 +104,39 @@ class LocalEmbeddingClient(Embeddings):
                 if response.status_code == 200:
                     self.http_requests += 1
                     data = response.json()
+
+                    # Cost usage hook: the OpenAI-compatible embeddings API
+                    # reports prompt (input) tokens in "usage"; when the
+                    # server reports nothing (e.g. local LM Studio), the
+                    # tokens are estimated from the payload texts
+                    try:
+                        from buissnes_agent.tools.rag_metrics import (
+                            estimate_tokens,
+                            log_cost_usage,
+                        )
+
+                        usage = data.get("usage") or {}
+                        reported = int(usage.get("prompt_tokens") or 0)
+                        if reported > 0:
+                            input_tokens = reported
+                            estimated = False
+                        else:
+                            raw_input = payload.get("input", "")
+                            texts = raw_input if isinstance(raw_input, list) else [raw_input]
+                            input_tokens = sum(estimate_tokens(t) for t in texts)
+                            estimated = True
+                        if input_tokens > 0:
+                            log_cost_usage(
+                                model=self.model,
+                                section="embedding",
+                                input_tokens=input_tokens,
+                                output_tokens=0,
+                                provider=os.getenv("EMBEDDING_PROVIDER", "local"),
+                                estimated=estimated,
+                            )
+                    except Exception as cost_err:
+                        logger.warning(f"Cost usage (embedding): {cost_err}")
+
                     if "data" in data and len(data["data"]) > 0:
                         # Return the list of vectors (whether it is a single text or a batch)
                         # The OpenAI API orders results in the 'data' array, we must extract them correctly

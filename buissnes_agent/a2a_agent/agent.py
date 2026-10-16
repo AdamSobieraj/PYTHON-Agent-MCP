@@ -1239,6 +1239,7 @@ class AnalysisAgent:
                         yield item
 
                 final_item = await self.get_agent_response(config)
+                await self._log_turn_usage(config)
                 if root_span is not None:
                     self._update_request_trace(
                         root_span,
@@ -1262,6 +1263,52 @@ class AnalysisAgent:
             self._end_request_trace(root_span)
             self._active_streams -= 1
             await self._maybe_close_stale_toolsets()
+
+    async def _log_turn_usage(self, config: dict[str, Any]) -> None:
+        """
+        Cost usage hook: report the token usage of the whole turn
+        (section=agent_generation). Best effort - only when the provider
+        reports usage in the messages. Never raises.
+        """
+        try:
+            if self.graph is None:
+                return
+            current_state = await self.graph.aget_state(config)
+            messages = current_state.values.get('messages', [])
+            input_tokens = 0
+            output_tokens = 0
+            for message in messages:
+                usage = getattr(message, 'usage_metadata', None)
+                if usage:
+                    input_tokens += int(usage.get('input_tokens') or 0)
+                    output_tokens += int(usage.get('output_tokens') or 0)
+            estimated = False
+            if not input_tokens and not output_tokens:
+                # The provider reported no usage - estimate from the
+                # turn messages (non-AI texts -> input, AI texts -> output)
+                from buissnes_agent.tools.rag_metrics import estimate_tokens
+
+                for message in messages:
+                    text = _extract_message_text(message)
+                    if getattr(message, 'type', '') == 'ai':
+                        output_tokens += estimate_tokens(text)
+                    else:
+                        input_tokens += estimate_tokens(text)
+                estimated = True
+            if input_tokens or output_tokens:
+                from buissnes_agent.tools.rag_metrics import log_cost_usage
+
+                log_cost_usage(
+                    model=os.getenv('CHAT_MODEL') or 'unknown',
+                    section='agent_generation',
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    provider=os.getenv('CHAT_PROVIDER', 'local'),
+                    metadata={'context_id': config.get('configurable', {}).get('thread_id')},
+                    estimated=estimated,
+                )
+        except Exception:
+            pass
 
     async def get_agent_response(
         self,

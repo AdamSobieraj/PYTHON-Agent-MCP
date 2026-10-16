@@ -26,6 +26,8 @@ class ChunkingQuality:
     num_chunks: int
     avg_chunk_len: float
     max_chunk_len: int
+    # Standard deviation of chunk lengths (H5/PB6: length stability)
+    std_chunk_len: float
     empty_chunks: int
     too_short_chunks: int
     over_limit_chunks: int
@@ -96,6 +98,16 @@ def compute_chunk_metrics(
     avg_chunk_len = (sum(lengths) / num_chunks) if num_chunks else 0.0
     max_chunk_len = max(lengths) if lengths else 0
 
+    # Standard deviation of chunk lengths (eq:std, n-1) - the
+    # length-stability measure behind H5/PB6 (hard-limit effect)
+    if num_chunks > 1:
+        mu = avg_chunk_len
+        std_chunk_len = math.sqrt(
+            sum((L - mu) ** 2 for L in lengths) / (num_chunks - 1)
+        )
+    else:
+        std_chunk_len = 0.0
+
     empty_chunks = sum(1 for t in texts if not t.strip())
     too_short_chunks = sum(1 for L in lengths if 0 < L < min_chunk_len)
 
@@ -141,6 +153,7 @@ def compute_chunk_metrics(
         num_chunks=num_chunks,
         avg_chunk_len=round(avg_chunk_len, 2),
         max_chunk_len=max_chunk_len,
+        std_chunk_len=round(std_chunk_len, 2),
         empty_chunks=empty_chunks,
         too_short_chunks=too_short_chunks,
         over_limit_chunks=over_limit_chunks,
