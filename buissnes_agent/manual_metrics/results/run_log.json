@@ -1,0 +1,675 @@
+{
+  "timestamp": "2026-10-22T04:06:18.763487",
+  "experiments": [
+    "E1",
+    "E2",
+    "E3",
+    "E4"
+  ],
+  "dataset": "buissnes_agent/inputs",
+  "metrics": [
+    "coherence",
+    "coverage",
+    "over_limit_ratio",
+    "avg_chunk_len",
+    "std_chunk_len",
+    "num_chunks",
+    "chunking_ms",
+    "total_ms"
+  ],
+  "records_analyzed": 702,
+  "summaries": {
+    "coherence": {
+      "metric": "coherence",
+      "strategies": {
+        "agentic": {
+          "n": 78,
+          "mean": 0.3923,
+          "std": 0.061,
+          "ci_low": 0.3797,
+          "ci_high": 0.4058
+        },
+        "fixedSize": {
+          "n": 286,
+          "mean": 0.3558,
+          "std": 0.0525,
+          "ci_low": 0.349,
+          "ci_high": 0.362
+        },
+        "semanticChunker": {
+          "n": 52,
+          "mean": 0.4106,
+          "std": 0.0603,
+          "ci_low": 0.3953,
+          "ci_high": 0.4258
+        },
+        "sentenceBased": {
+          "n": 286,
+          "mean": 0.3831,
+          "std": 0.0591,
+          "ci_low": 0.3758,
+          "ci_high": 0.39
+        }
+      },
+      "wilcoxon": {
+        "agentic vs fixedSize": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "agentic vs semanticChunker": {
+          "statistic": 14.0,
+          "p_value": 0.026611328125
+        },
+        "agentic vs sentenceBased": {
+          "statistic": 9.0,
+          "p_value": 0.0078125
+        },
+        "fixedSize vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "fixedSize vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "semanticChunker vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        }
+      }
+    },
+    "coverage": {
+      "metric": "coverage",
+      "strategies": {
+        "agentic": {
+          "n": 78,
+          "mean": 0.9984,
+          "std": 0.0047,
+          "ci_low": 0.9973,
+          "ci_high": 0.9993
+        },
+        "fixedSize": {
+          "n": 286,
+          "mean": 0.9783,
+          "std": 0.0357,
+          "ci_low": 0.9741,
+          "ci_high": 0.9822
+        },
+        "semanticChunker": {
+          "n": 52,
+          "mean": 0.9984,
+          "std": 0.0047,
+          "ci_low": 0.9971,
+          "ci_high": 0.9995
+        },
+        "sentenceBased": {
+          "n": 286,
+          "mean": 0.9978,
+          "std": 0.0048,
+          "ci_low": 0.9972,
+          "ci_high": 0.9983
+        }
+      },
+      "wilcoxon": {
+        "agentic vs fixedSize": {
+          "statistic": 0.0,
+          "p_value": 0.0009765625
+        },
+        "agentic vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 1.0
+        },
+        "agentic vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 1.0
+        },
+        "fixedSize vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 0.0009765625
+        },
+        "fixedSize vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.0009765625
+        },
+        "semanticChunker vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 1.0
+        }
+      }
+    },
+    "over_limit_ratio": {
+      "metric": "over_limit_ratio",
+      "strategies": {
+        "agentic": {
+          "n": 78,
+          "mean": 0.0,
+          "std": 0.0,
+          "ci_low": 0.0,
+          "ci_high": 0.0
+        },
+        "fixedSize": {
+          "n": 286,
+          "mean": 0.0,
+          "std": 0.0,
+          "ci_low": 0.0,
+          "ci_high": 0.0
+        },
+        "semanticChunker": {
+          "n": 52,
+          "mean": 0.0,
+          "std": 0.0,
+          "ci_low": 0.0,
+          "ci_high": 0.0
+        },
+        "sentenceBased": {
+          "n": 286,
+          "mean": 0.0,
+          "std": 0.0,
+          "ci_low": 0.0,
+          "ci_high": 0.0
+        }
+      },
+      "wilcoxon": {
+        "agentic vs fixedSize": {
+          "statistic": 0.0,
+          "p_value": 1.0
+        },
+        "agentic vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 1.0
+        },
+        "agentic vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 1.0
+        },
+        "fixedSize vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 1.0
+        },
+        "fixedSize vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 1.0
+        },
+        "semanticChunker vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 1.0
+        }
+      }
+    },
+    "avg_chunk_len": {
+      "metric": "avg_chunk_len",
+      "strategies": {
+        "agentic": {
+          "n": 78,
+          "mean": 381.9494,
+          "std": 90.5255,
+          "ci_low": 363.0014,
+          "ci_high": 402.0853
+        },
+        "fixedSize": {
+          "n": 286,
+          "mean": 622.6386,
+          "std": 256.5493,
+          "ci_low": 593.8348,
+          "ci_high": 652.7953
+        },
+        "semanticChunker": {
+          "n": 52,
+          "mean": 350.23,
+          "std": 35.4953,
+          "ci_low": 340.8846,
+          "ci_high": 360.1363
+        },
+        "sentenceBased": {
+          "n": 286,
+          "mean": 559.4139,
+          "std": 252.4735,
+          "ci_low": 530.6915,
+          "ci_high": 588.9656
+        }
+      },
+      "wilcoxon": {
+        "agentic vs fixedSize": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "agentic vs semanticChunker": {
+          "statistic": 19.0,
+          "p_value": 0.068115234375
+        },
+        "agentic vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "fixedSize vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "fixedSize vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "semanticChunker vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        }
+      }
+    },
+    "std_chunk_len": {
+      "metric": "std_chunk_len",
+      "strategies": {
+        "agentic": {
+          "n": 78,
+          "mean": 151.279,
+          "std": 22.3243,
+          "ci_low": 146.4323,
+          "ci_high": 156.1265
+        },
+        "fixedSize": {
+          "n": 286,
+          "mean": 28.327,
+          "std": 39.7141,
+          "ci_low": 24.0483,
+          "ci_high": 33.2408
+        },
+        "semanticChunker": {
+          "n": 52,
+          "mean": 160.0862,
+          "std": 11.7062,
+          "ci_low": 157.1729,
+          "ci_high": 163.384
+        },
+        "sentenceBased": {
+          "n": 286,
+          "mean": 78.1041,
+          "std": 53.5808,
+          "ci_low": 72.2788,
+          "ci_high": 84.5217
+        }
+      },
+      "wilcoxon": {
+        "agentic vs fixedSize": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "agentic vs semanticChunker": {
+          "statistic": 37.0,
+          "p_value": 0.587890625
+        },
+        "agentic vs sentenceBased": {
+          "statistic": 1.0,
+          "p_value": 0.00048828125
+        },
+        "fixedSize vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "fixedSize vs sentenceBased": {
+          "statistic": 1.0,
+          "p_value": 0.00048828125
+        },
+        "semanticChunker vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        }
+      }
+    },
+    "num_chunks": {
+      "metric": "num_chunks",
+      "strategies": {
+        "agentic": {
+          "n": 78,
+          "mean": 1501.6795,
+          "std": 2144.4934,
+          "ci_low": 1051.0128,
+          "ci_high": 1989.0128
+        },
+        "fixedSize": {
+          "n": 286,
+          "mean": 1015.958,
+          "std": 1600.4534,
+          "ci_low": 846.1399,
+          "ci_high": 1190.2517
+        },
+        "semanticChunker": {
+          "n": 52,
+          "mean": 1421.8462,
+          "std": 1954.6077,
+          "ci_low": 932.6923,
+          "ci_high": 1964.0385
+        },
+        "sentenceBased": {
+          "n": 286,
+          "mean": 1059.9091,
+          "std": 1660.9655,
+          "ci_low": 882.7587,
+          "ci_high": 1240.5
+        }
+      },
+      "wilcoxon": {
+        "agentic vs fixedSize": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "agentic vs semanticChunker": {
+          "statistic": 4.0,
+          "p_value": 0.001708984375
+        },
+        "agentic vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "fixedSize vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "fixedSize vs sentenceBased": {
+          "statistic": 5.0,
+          "p_value": 0.0107421875
+        },
+        "semanticChunker vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        }
+      }
+    },
+    "chunking_ms": {
+      "metric": "chunking_ms",
+      "strategies": {
+        "agentic": {
+          "n": 78,
+          "mean": 144655.8718,
+          "std": 277240.6227,
+          "ci_low": 85016.9649,
+          "ci_high": 214353.939
+        },
+        "fixedSize": {
+          "n": 286,
+          "mean": 874.4845,
+          "std": 1468.9729,
+          "ci_low": 712.3025,
+          "ci_high": 1042.2137
+        },
+        "semanticChunker": {
+          "n": 52,
+          "mean": 75869.4748,
+          "std": 111408.3779,
+          "ci_low": 48228.7208,
+          "ci_high": 106154.6158
+        },
+        "sentenceBased": {
+          "n": 286,
+          "mean": 721.0261,
+          "std": 1328.4482,
+          "ci_low": 580.3125,
+          "ci_high": 871.9796
+        }
+      },
+      "wilcoxon": {
+        "agentic vs fixedSize": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "agentic vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "agentic vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "fixedSize vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "fixedSize vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "semanticChunker vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        }
+      }
+    },
+    "total_ms": {
+      "metric": "total_ms",
+      "strategies": {
+        "agentic": {
+          "n": 78,
+          "mean": 168656.7087,
+          "std": 308434.3673,
+          "ci_low": 102222.9569,
+          "ci_high": 245581.2326
+        },
+        "fixedSize": {
+          "n": 286,
+          "mean": 17627.6778,
+          "std": 27397.1977,
+          "ci_low": 14620.5457,
+          "ci_high": 20654.8747
+        },
+        "semanticChunker": {
+          "n": 52,
+          "mean": 98201.5777,
+          "std": 142095.0562,
+          "ci_low": 62807.0871,
+          "ci_high": 136736.8667
+        },
+        "sentenceBased": {
+          "n": 286,
+          "mean": 17403.2307,
+          "std": 26667.6991,
+          "ci_low": 14505.8046,
+          "ci_high": 20345.256
+        }
+      },
+      "wilcoxon": {
+        "agentic vs fixedSize": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "agentic vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "agentic vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "fixedSize vs semanticChunker": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        },
+        "fixedSize vs sentenceBased": {
+          "statistic": 45.0,
+          "p_value": 1.0
+        },
+        "semanticChunker vs sentenceBased": {
+          "statistic": 0.0,
+          "p_value": 0.000244140625
+        }
+      }
+    }
+  },
+  "latency": {
+    "documents": {
+      "ALL": {
+        "strategy": "ALL",
+        "chunking_ms": {
+          "n": 702,
+          "mean": 22342.86,
+          "p50": 71.12,
+          "p95": 88948.49,
+          "p99": 851527.4
+        },
+        "embedding_ms": {
+          "n": 702,
+          "mean": 17942.82,
+          "p50": 3371.65,
+          "p95": 86826.86,
+          "p99": 114467.1
+        },
+        "storage_ms": {
+          "n": 702,
+          "mean": 1436.29,
+          "p50": 265.44,
+          "p95": 6347.92,
+          "p99": 11946.51
+        },
+        "total_ms": {
+          "n": 702,
+          "mean": 40285.68,
+          "p50": 4744.97,
+          "p95": 143709.98,
+          "p99": 947386.11
+        }
+      },
+      "agentic": {
+        "strategy": "agentic",
+        "chunking_ms": {
+          "n": 78,
+          "mean": 144655.87,
+          "p50": 11521.23,
+          "p95": 884072.86,
+          "p99": 904763.83
+        },
+        "embedding_ms": {
+          "n": 78,
+          "mean": 24000.83,
+          "p50": 4140.0,
+          "p95": 108063.72,
+          "p99": 110905.74
+        },
+        "storage_ms": {
+          "n": 78,
+          "mean": 1997.77,
+          "p50": 334.38,
+          "p95": 7969.42,
+          "p99": 11778.43
+        },
+        "total_ms": {
+          "n": 78,
+          "mean": 168656.71,
+          "p50": 26044.4,
+          "p95": 988562.75,
+          "p99": 1012660.45
+        }
+      },
+      "fixedSize": {
+        "strategy": "fixedSize",
+        "chunking_ms": {
+          "n": 286,
+          "mean": 874.48,
+          "p50": 53.65,
+          "p95": 3348.39,
+          "p99": 6763.05
+        },
+        "embedding_ms": {
+          "n": 286,
+          "mean": 16753.19,
+          "p50": 3186.36,
+          "p95": 58006.46,
+          "p99": 115938.43
+        },
+        "storage_ms": {
+          "n": 286,
+          "mean": 1322.16,
+          "p50": 246.71,
+          "p95": 4978.29,
+          "p99": 10609.22
+        },
+        "total_ms": {
+          "n": 286,
+          "mean": 17627.68,
+          "p50": 3243.47,
+          "p95": 61308.72,
+          "p99": 122771.95
+        }
+      },
+      "semanticChunker": {
+        "strategy": "semanticChunker",
+        "chunking_ms": {
+          "n": 52,
+          "mean": 75869.47,
+          "p50": 9575.37,
+          "p95": 306749.36,
+          "p99": 338266.16
+        },
+        "embedding_ms": {
+          "n": 52,
+          "mean": 22332.1,
+          "p50": 4372.79,
+          "p95": 87303.72,
+          "p99": 89403.7
+        },
+        "storage_ms": {
+          "n": 52,
+          "mean": 1840.31,
+          "p50": 366.37,
+          "p95": 7381.58,
+          "p99": 9850.23
+        },
+        "total_ms": {
+          "n": 52,
+          "mean": 98201.58,
+          "p50": 13259.43,
+          "p95": 393776.68,
+          "p99": 425403.21
+        }
+      },
+      "sentenceBased": {
+        "strategy": "sentenceBased",
+        "chunking_ms": {
+          "n": 286,
+          "mean": 721.03,
+          "p50": 21.85,
+          "p95": 3114.78,
+          "p99": 6189.53
+        },
+        "embedding_ms": {
+          "n": 286,
+          "mean": 16682.2,
+          "p50": 3339.54,
+          "p95": 58615.46,
+          "p99": 116939.45
+        },
+        "storage_ms": {
+          "n": 286,
+          "mean": 1323.84,
+          "p50": 257.24,
+          "p95": 5316.5,
+          "p99": 11986.46
+        },
+        "total_ms": {
+          "n": 286,
+          "mean": 17403.23,
+          "p50": 3363.36,
+          "p95": 61083.86,
+          "p99": 123164.61
+        }
+      }
+    }
+  },
+  "exported_files": [
+    "results\\coherence_summary.csv",
+    "results\\coherence_table.tex",
+    "results\\coverage_summary.csv",
+    "results\\coverage_table.tex",
+    "results\\over_limit_ratio_summary.csv",
+    "results\\over_limit_ratio_table.tex",
+    "results\\avg_chunk_len_summary.csv",
+    "results\\avg_chunk_len_table.tex",
+    "results\\std_chunk_len_summary.csv",
+    "results\\std_chunk_len_table.tex",
+    "results\\num_chunks_summary.csv",
+    "results\\num_chunks_table.tex",
+    "results\\chunking_ms_summary.csv",
+    "results\\chunking_ms_table.tex",
+    "results\\total_ms_summary.csv",
+    "results\\total_ms_table.tex",
+    "results\\latency_documents.csv",
+    "results\\latency_documents_table.tex",
+    "results\\run_log.json"
+  ]
+}

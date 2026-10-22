@@ -166,10 +166,13 @@ class SearchKnowledgebase:
                         if key not in doc.metadata or doc.metadata.get(key) is None:
                             doc.metadata[key] = value
 
-                # Counter baselines (for per-document deltas)
+                # Counter baselines (for per-document deltas).
+                # Note: only the embedding client and storage counters persist
+                # across documents; the strategy object is created anew for
+                # each document by the LangChainChunker factory, so its cost
+                # counters (llm_calls, fallbacks) are read as absolutes below.
                 emb_requests_before = getattr(self.client, "http_requests", 0)
                 emb_texts_before = getattr(self.client, "texts_embedded", 0)
-                strat_before = self._strategy_counters()
                 storage_before = self._storage_ms_total
 
                 doc_start = time.perf_counter()
@@ -181,7 +184,8 @@ class SearchKnowledgebase:
 
                 # 4. EMBEDDING & BATCHING
                 t0 = time.perf_counter()
-                self._embed_and_queue_batch(processed_chunks, batch_items)
+                self._embed_and_queue_batch(
+                    object_key, processed_chunks, batch_items)
                 embedding_ms = (time.perf_counter() - t0) * 1000
 
                 total_ms = (time.perf_counter() - doc_start) * 1000
@@ -207,9 +211,9 @@ class SearchKnowledgebase:
                     "texts_embedded":
                         getattr(self.client, "texts_embedded", 0) - emb_texts_before,
                     "llm_calls":
-                        self._strategy_counters()["llm_calls"] - strat_before["llm_calls"],
+                        self._strategy_counters()["llm_calls"],
                     "fallbacks":
-                        self._strategy_counters()["fallbacks"] - strat_before["fallbacks"],
+                        self._strategy_counters()["fallbacks"],
                     "timestamp": datetime.now().isoformat(),
                 }
                 record.update(extra)
@@ -323,6 +327,7 @@ class SearchKnowledgebase:
 
     def _embed_and_queue_batch(
             self,
+            object_key: str,
             processed_chunks: list[dict],
             batch_items: list[dict]
     ) -> None:
@@ -334,7 +339,16 @@ class SearchKnowledgebase:
             metadata = item["metadata"]
 
             # Generate vector
-            vec = self.client.embed_query(text_content)
+            try:
+                vec = self.client.embed_query(text_content)
+            except Exception as e:
+                # Embedding outage: the chunk cannot be indexed - skip it
+                # but keep the document alive so the per-document metrics
+                # record is still written (texts_embedded reflects the loss)
+                logger.error(
+                    "Embedding failed, chunk not indexed "
+                    "(%s): %s", object_key, e)
+                continue
 
             batch_items.append({
                 "text": text_content,

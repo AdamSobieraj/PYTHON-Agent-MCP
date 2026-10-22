@@ -54,6 +54,7 @@ class FakeChatOpenAI:
     fail = False        # invoke() raises (endpoint down)
     bad_output = False  # invoke() returns non-JSON prose
     single_group = False  # LLM lumps everything into one group
+    bad_first = False   # first invoke drops the last sentence (invalid partition)
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -64,6 +65,12 @@ class FakeChatOpenAI:
             raise RuntimeError("LLM endpoint unavailable")
         if FakeChatOpenAI.bad_output:
             return _Resp("Sorry, I cannot do that.")
+        if FakeChatOpenAI.bad_first and FakeChatOpenAI.calls == 1:
+            # invalid partition: drops the last sentence (mirrors the real model)
+            human = messages[1]["content"]
+            lines = re.findall(r"^\s*(\d+)\.\s(.+)$", human, flags=re.M)
+            nums = [int(n) for n, _ in lines][:-1]
+            return _Resp(json.dumps([nums[:2], nums[2:]]))
 
         human = messages[1]["content"]
         lines = re.findall(r"^\s*(\d+)\.\s(.+)$", human, flags=re.M)
@@ -102,6 +109,7 @@ def reset():
     FakeChatOpenAI.fail = False
     FakeChatOpenAI.bad_output = False
     FakeChatOpenAI.single_group = False
+    FakeChatOpenAI.bad_first = False
 
 
 def check(name, cond, detail=""):
@@ -125,20 +133,29 @@ check("T1 text preserved", "".join(d.page_content for d in out) == TEXT)
 check("T1 one LLM call for one window", FakeChatOpenAI.calls == 1, str(FakeChatOpenAI.calls))
 
 # --------------------------------------------------------------- Test 2
-# LLM down -> deterministic fallback, ingestion still succeeds
+# LLM down -> deterministic fallback, ingestion still succeeds,
+# and NO retry (a correction prompt cannot fix a dead endpoint)
 reset(); FakeChatOpenAI.fail = True
-out2 = NewAgenticStrategy(10000, 0).split_documents([Document(TEXT, {"page_number": 1})])
+s2 = NewAgenticStrategy(10000, 0)
+out2 = s2.split_documents([Document(TEXT, {"page_number": 1})])
 check("T2 LLM failure falls back (no crash)",
       len(out2) == 1 and "".join(d.page_content for d in out2) == TEXT,
       repr([d.page_content for d in out2]))
+check("T2 no retry on transport failure (1 call, 1 fallback)",
+      FakeChatOpenAI.calls == 1 and s2.llm_calls == 1 and s2.fallbacks == 1,
+      f"calls={FakeChatOpenAI.calls} llm={s2.llm_calls} fb={s2.fallbacks}")
 
 # --------------------------------------------------------------- Test 3
-# LLM returns garbage -> fallback
+# LLM returns garbage -> one retry, then fallback
 reset(); FakeChatOpenAI.bad_output = True
-out3 = NewAgenticStrategy(10000, 0).split_documents([Document(TEXT, {"page_number": 1})])
+s3 = NewAgenticStrategy(10000, 0)
+out3 = s3.split_documents([Document(TEXT, {"page_number": 1})])
 check("T3 invalid LLM output falls back",
       len(out3) == 1 and "".join(d.page_content for d in out3) == TEXT,
       repr([d.page_content for d in out3]))
+check("T3 retried once, then fallback (2 calls, 1 fallback)",
+      FakeChatOpenAI.calls == 2 and s3.llm_calls == 2 and s3.fallbacks == 1,
+      f"calls={FakeChatOpenAI.calls} llm={s3.llm_calls} fb={s3.fallbacks}")
 
 # --------------------------------------------------------------- Test 4
 # LLM lumps everything into one group -> size bounding subdivides it
@@ -160,7 +177,7 @@ out5 = NewAgenticStrategy(100, 15).split_documents([Document(short, {"page_numbe
 print("      chunks:", [d.page_content for d in out5])
 check("T5 two LLM groups", len(out5) == 2, str(len(out5)))
 check("T5 overlap carries trailing sentence",
-      len(out5) == 2 and out5[1].page_content.startswith(" The cat drank."),
+      len(out5) == 2 and out5[1].page_content.startswith("The cat drank."),
       repr([d.page_content for d in out5]))
 
 # --------------------------------------------------------------- Test 6
@@ -238,6 +255,18 @@ check("T13 fenced JSON", E("```json\n[[1,2],[3]]\n```") == [[1, 2], [3]])
 check("T13 prose around JSON", E("Here is the grouping: [[1,2],[3]] done.") == [[1, 2], [3]])
 check("T13 no JSON -> None", E("I cannot do that.") is None)
 check("T13 list content blocks", E([{"type": "text", "text": "[[1]]"}]) == [[1]])
+
+# --------------------------------------------------------------- Test 14
+# Invalid partition (drops last sentence) -> one correction retry -> valid
+reset(); FakeChatOpenAI.bad_first = True
+s14 = NewAgenticStrategy(10000, 0)
+out14 = s14.split_documents([Document(TEXT, {"page_number": 1})])
+check("T14 retry after invalid partition",
+      len(out14) == 2 and "".join(d.page_content for d in out14) == TEXT,
+      repr([d.page_content for d in out14]))
+check("T14 two LLM calls (1 + retry), no fallback",
+      FakeChatOpenAI.calls == 2 and s14.llm_calls == 2 and s14.fallbacks == 0,
+      f"calls={FakeChatOpenAI.calls} llm={s14.llm_calls} fb={s14.fallbacks}")
 
 print()
 if failures:

@@ -1,0 +1,5 @@
+strategy,n,mean,std,ci_low,ci_high
+agentic,78,0.3923,0.061,0.3797,0.4058
+fixedSize,286,0.3558,0.0525,0.349,0.362
+semanticChunker,52,0.4106,0.0603,0.3953,0.4258
+sentenceBased,286,0.3831,0.0591,0.3758,0.39

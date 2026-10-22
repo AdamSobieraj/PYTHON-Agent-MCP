@@ -1,0 +1,31 @@
+\begin{table}[H]
+\centering
+\caption{Processing phase latencies (ms) per chunking strategy (p50 / p95 / p99, per document)}
+\small
+\begin{tabular}{@{}llrrrrr@{}}
+\toprule
+\textbf{Strategy} & \textbf{Phase} & \textbf{n} & \textbf{mean (ms)} & \textbf{p50} & \textbf{p95} & \textbf{p99} \\
+\midrule
+\textbf{ALL} & chunking & 702 & 22343 & 71 & 88948 & 851527 \\
+\textbf{ALL} & embedding & 702 & 17943 & 3372 & 86827 & 114467 \\
+\textbf{ALL} & storage & 702 & 1436 & 265 & 6348 & 11947 \\
+\textbf{ALL} & total & 702 & 40286 & 4745 & 143710 & 947386 \\
+\textbf{agentic} & chunking & 78 & 144656 & 11521 & 884073 & 904764 \\
+\textbf{agentic} & embedding & 78 & 24001 & 4140 & 108064 & 110906 \\
+\textbf{agentic} & storage & 78 & 1998 & 334 & 7969 & 11778 \\
+\textbf{agentic} & total & 78 & 168657 & 26044 & 988563 & 1012660 \\
+\textbf{fixedSize} & chunking & 286 & 874 & 54 & 3348 & 6763 \\
+\textbf{fixedSize} & embedding & 286 & 16753 & 3186 & 58006 & 115938 \\
+\textbf{fixedSize} & storage & 286 & 1322 & 247 & 4978 & 10609 \\
+\textbf{fixedSize} & total & 286 & 17628 & 3243 & 61309 & 122772 \\
+\textbf{semanticChunker} & chunking & 52 & 75869 & 9575 & 306749 & 338266 \\
+\textbf{semanticChunker} & embedding & 52 & 22332 & 4373 & 87304 & 89404 \\
+\textbf{semanticChunker} & storage & 52 & 1840 & 366 & 7382 & 9850 \\
+\textbf{semanticChunker} & total & 52 & 98202 & 13259 & 393777 & 425403 \\
+\textbf{sentenceBased} & chunking & 286 & 721 & 22 & 3115 & 6190 \\
+\textbf{sentenceBased} & embedding & 286 & 16682 & 3340 & 58615 & 116939 \\
+\textbf{sentenceBased} & storage & 286 & 1324 & 257 & 5316 & 11986 \\
+\textbf{sentenceBased} & total & 286 & 17403 & 3363 & 61084 & 123165 \\
+\bottomrule
+\end{tabular}
+\end{table}

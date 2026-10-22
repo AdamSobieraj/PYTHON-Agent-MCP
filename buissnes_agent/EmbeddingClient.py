@@ -34,8 +34,23 @@ class LocalEmbeddingClient(Embeddings):
         self.max_retries = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
         self.base_delay = float(os.getenv("EMBEDDING_DELAY", "1.0"))
 
+        # Read timeout (seconds) for one embedding HTTP request.
+        # Local models (e.g. 4B on LM Studio) can need minutes per batch.
+        self.timeout = int(os.getenv("EMBEDDING_TIMEOUT", "600"))
+
         # Limit on the number of texts sent in a single HTTP request
         self.batch_size = batch_size or int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
+
+        # EOS token workaround. Some local embedding models (e.g. Qwen3-Embedding
+        # via llama.cpp) use last-token pooling and were trained with an EOS/SEP at
+        # the end of the text. When the GGUF header does not declare
+        # add_eos_token=true, llama.cpp computes the vector from the last word
+        # instead of the EOS state (lower retrieval quality) and warns about it.
+        # Instead of patching the GGUF we can append the model's EOS token to every
+        # text on the client side. Toggle with EMBEDDING_APPEND_EOS; the token
+        # string itself is read from EMBEDDING_EOS_TOKEN.
+        self.append_eos = os.getenv("EMBEDDING_APPEND_EOS", "false").lower() in ('true', '1', 't')
+        self.eos_token = os.getenv("EMBEDDING_EOS_TOKEN", "")
 
         self.endpoint_url = f"{self.base_url}"
 
@@ -69,7 +84,8 @@ class LocalEmbeddingClient(Embeddings):
         self.http_requests = 0
         self.texts_embedded = 0
 
-        logger.info(f"Initialized LocalEmbeddingClient: {self.model} @ {self.endpoint_url}")
+        eos_info = f" | EOS append: ON (token={self.eos_token!r})" if (self.append_eos and self.eos_token) else ""
+        logger.info(f"Initialized LocalEmbeddingClient: {self.model} @ {self.endpoint_url}{eos_info}")
 
     def reset_counters(self) -> None:
         """Reset cost counters (call between documents / experiments)."""
@@ -85,6 +101,17 @@ class LocalEmbeddingClient(Embeddings):
         # Guard against an empty string within a batch
         return clean if clean else " "
 
+    def _append_eos(self, text: str) -> str:
+        """Append the configured EOS token when EMBEDDING_APPEND_EOS is enabled.
+
+        The token is appended directly (no separator): EOS is a boundary token,
+        so it must stand alone at the very end of the text. Empty placeholders
+        are left untouched.
+        """
+        if self.append_eos and self.eos_token and text.strip():
+            return f"{text}{self.eos_token}"
+        return text
+
     def _post_with_retry(self, payload: dict) -> List[List[float]]:
         """
         Main engine sending HTTP requests with built-in Retry, Backoff and Jitter.
@@ -95,9 +122,9 @@ class LocalEmbeddingClient(Embeddings):
             try:
                 logger.info(f"Sending POST to {self.endpoint_url} with verify={self.session.verify}")
                 response = self.session.post(
-                    self.endpoint_url, 
-                    json=payload, 
-                    timeout=120,
+                    self.endpoint_url,
+                    json=payload,
+                    timeout=self.timeout,
                     verify=self.session.verify
                 )
 
@@ -180,7 +207,7 @@ class LocalEmbeddingClient(Embeddings):
             return []
 
         all_embeddings = []
-        clean_texts = [self._clean_text(t) for t in texts]
+        clean_texts = [self._append_eos(self._clean_text(t)) for t in texts]
 
         # Split the large list of texts into smaller packs (chunks) according to self.batch_size
         for i in range(0, len(clean_texts), self.batch_size):
@@ -207,6 +234,8 @@ class LocalEmbeddingClient(Embeddings):
         # Guard against empty text (returns all zeros for a fast response)
         if clean_text == " ":
             return [0.0] * self.dimensions
+
+        clean_text = self._append_eos(clean_text)
 
         payload = {
             "input": [clean_text],  # We usually send it as a single-element array

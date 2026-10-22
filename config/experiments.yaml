@@ -11,10 +11,10 @@ dataset_path: "buissnes_agent/inputs"
 
 # Research strategies (names from chapter 4)
 strategies:
+  - agentic
   - fixedSize
   - sentenceBased
   - semanticChunker
-  - agentic
 
 # Base parameters (E1, E2)
 parameters:

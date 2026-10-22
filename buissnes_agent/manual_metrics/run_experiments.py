@@ -110,13 +110,28 @@ def _quality_callback(client, chunk_size: int, min_chunk_len: int):
 
     def callback(object_key, documents_list, processed_chunks) -> Dict[str, Any]:
         source_text = "\n".join(d.page_content for d in documents_list)
-        quality = compute_chunk_metrics(
-            processed_chunks,
-            source_text,
-            chunk_size=chunk_size,
-            min_chunk_len=min_chunk_len,
-            embeddings=client,
-        )
+        try:
+            quality = compute_chunk_metrics(
+                processed_chunks,
+                source_text,
+                chunk_size=chunk_size,
+                min_chunk_len=min_chunk_len,
+                embeddings=client,
+            )
+        except Exception as e:
+            # Fault-injected run (E4/embedding_failure): coherence needs the
+            # embedding endpoint -> recompute without it (coherence = None),
+            # all other quality metrics are still produced
+            print(f"[warn] quality metrics for {object_key}: "
+                  f"embeddings unavailable ({e}); "
+                  f"recomputing without coherence")
+            quality = compute_chunk_metrics(
+                processed_chunks,
+                source_text,
+                chunk_size=chunk_size,
+                min_chunk_len=min_chunk_len,
+                embeddings=None,
+            )
         return quality.to_dict()
 
     return callback
@@ -160,7 +175,8 @@ def _embedding_fault(client):
     E4/embedding_failure: the embedding endpoint always rejects requests.
     """
 
-    def boom(payload):
+    def boom(self, *args):
+        # bound via MethodType: self is injected, *args swallows the payload
         raise RuntimeError("simulated embedding outage (E4)")
 
     original = client._post_with_retry
@@ -365,10 +381,14 @@ def run_e3(cfg: Dict[str, Any], dataset_path: str) -> List[Dict[str, Any]]:
     return results
 
 
-def run_e4(cfg: Dict[str, Any], dataset_path: str) -> List[Dict[str, Any]]:
-    """E4: resilience to failures (agentic fallback / no embeddings)."""
+def run_e4(cfg: Dict[str, Any], dataset_path: str,
+           faults: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """E4: resilience to failures (agentic fallback / no embeddings).
+
+    `faults` optionally filters the configured fault list (CLI: --fault).
+    """
     e4 = cfg.get("e4", {})
-    faults = e4.get("faults", ["llm_failure", "embedding_failure"])
+    faults = faults or e4.get("faults", ["llm_failure", "embedding_failure"])
     fault_strategy = e4.get("fault_strategy_map", {
         "llm_failure": "agentic",
         "embedding_failure": "semanticChunker",
@@ -416,6 +436,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--dataset", default=None,
         help="override dataset_path from the configuration"
     )
+    parser.add_argument(
+        "--fault", default=None,
+        help="E4 only: comma-separated fault filter "
+             "(llm_failure,embedding_failure)"
+    )
     args = parser.parse_args(argv)
 
     cfg = _load_experiments_config(args.config)
@@ -429,9 +454,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"source: {data_source()} | dataset: {dataset_path} ="
     )
 
+    fault_filter = (
+        [f.strip() for f in args.fault.split(",") if f.strip()]
+        if args.fault else None
+    )
+
     for name in names:
         print(f"\n=== {name} ===")
-        RUNNERS[name](cfg, dataset_path)
+        if name == "E4":
+            run_e4(cfg, dataset_path, faults=fault_filter)
+        else:
+            RUNNERS[name](cfg, dataset_path)
 
     print("\n= KONIEC. Wyniki zapisane w bazie metryk "
           f"({os.getenv('METRICS_STORAGE_TYPE', 'file')}) =")

@@ -62,6 +62,14 @@ class NewSemanticStrategy(ChunkingStrategy):
         # Reused: sentence detection + size-bounded regrouping with overlap
         self._sentence_strategy = NewSentenceBasedStrategy(chunk_size, chunk_overlap)
 
+        # Cost counters (E4 metrics) - number of fallbacks to
+        # deterministic sentence packing after an embedding failure
+        self.fallbacks = 0
+
+    def reset_counters(self) -> None:
+        """Reset cost counters (call between documents / experiments)."""
+        self.fallbacks = 0
+
     # ------------------------------------------------------------------
     # INTERFACE (ChunkingStrategy)
     # ------------------------------------------------------------------
@@ -101,7 +109,17 @@ class NewSemanticStrategy(ChunkingStrategy):
     # ------------------------------------------------------------------
     def _chunk_texts(self, units: List[str]) -> List[str]:
         """Semantic groups, then size bounding. Returns chunk texts."""
-        groups = self._semantic_groups(units)
+        try:
+            groups = self._semantic_groups(units)
+        except Exception as e:
+            # Embedding endpoint failure -> deterministic sentence
+            # packing fallback (ingestion is never blocked by the
+            # embedding service)
+            logger.warning(
+                "NewSemanticStrategy: embedding failed (%s); "
+                "falling back to sentence grouping", e)
+            self.fallbacks += 1
+            return self._sentence_strategy.group_units(units)
 
         result: List[str] = []
         for group in groups:

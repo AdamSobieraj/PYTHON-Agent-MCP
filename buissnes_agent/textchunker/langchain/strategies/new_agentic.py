@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from typing import Any, List, Optional
 
 from langchain_core.documents import Document
@@ -14,26 +15,32 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are a document chunking assistant. "
-    "You group numbered sentences into coherent topical chunks. "
-    "You must respond with ONLY a JSON array of arrays of sentence numbers, "
+    "You find where new topics begin in a list of numbered sentences. "
+    "You must respond with ONLY a JSON array of integers, "
     "without any commentary or code fences."
 )
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 class NewAgenticStrategy(ChunkingStrategy):
     """
     ### Strategy 8: Agentic (LLM-proposed boundaries)
 
-    Uses a language model to propose where chunks should start and end.
+    Uses a language model to propose where chunks should start.
     The model is set in the .env file (CHAT_BASE_URL, CHAT_API_KEY, CHAT_MODEL).
 
     **How it works:**
     1. Text is split into sentences (via NewSentenceBasedStrategy).
-    2. Sentences are sent to the LLM in windows (max_sentences_per_request)
-       and the model must return a JSON partition, e.g. [[1,2],[3,4,5]] —
-       contiguous, in-order sentence-number groups covering every sentence.
-    3. Invalid responses or LLM call failures fall back to deterministic
-       sentence packing for that window (warning logged; ingestion never
+    2. Sentences are sent to the LLM in windows (max_sentences_per_request).
+       The model returns only the numbers of the sentences that START a new
+       chunk, e.g. [1, 4, 9]. The code turns that into a contiguous,
+       in-order partition, so the result is valid by construction
+       (no gaps, no duplicates). Messy answers such as [[1,7],[8,14]] are
+       tolerated: the first number of each element is used as a start.
+    3. If no usable answer comes back, one retry is made. If that also
+       fails, or the LLM call itself fails, the window falls back to
+       deterministic sentence packing (warning logged; ingestion never
        crashes because of the LLM).
     4. Groups larger than chunk_size are subdivided at sentence boundaries.
     5. chunk_overlap carries trailing sentences into the next chunk.
@@ -139,29 +146,59 @@ class NewAgenticStrategy(ChunkingStrategy):
         return groups
 
     def _groups_for_window(self, window: List[str]) -> List[List[str]]:
-        """Asks the LLM for a sentence partition of the window (with fallback)."""
-        self.llm_calls += 1
+        """Asks the LLM where new chunks start within the window.
+
+        One retry when the answer contains no usable numbers, then a
+        deterministic sentence-packing fallback. Transport failures
+        (endpoint down) skip the retry and go straight to the fallback.
+        """
+        n = len(window)
+        messages = self._build_prompt(window)
+
         try:
-            prompt = self._build_prompt(window)
-            response = self.llm.invoke(prompt)
-            self._log_llm_usage(response, prompt)
-            content = response.content if hasattr(response, "content") else str(response)
-            parsed = self._extract_json(content)
-            numbers = self._validate_partition(parsed, len(window))
-            if numbers is not None:
-                return [[window[i - 1] for i in nums] for nums in numbers]
-            self.fallbacks += 1
-            logger.warning(
-                "NewAgenticStrategy: LLM returned an invalid partition; "
-                "falling back to sentence packing for %d sentence(s).", len(window)
-            )
+            content = self._invoke_and_log(messages)
         except Exception as e:
             self.fallbacks += 1
             logger.warning(
                 "NewAgenticStrategy: LLM call failed (%s); "
-                "falling back to sentence packing for %d sentence(s).", e, len(window)
+                "falling back to sentence packing for %d sentence(s).", e, n
             )
-        return self._pack_units(window)
+            return self._pack_units(window)
+
+        numbers = self._starts_to_groups(self._extract_json(content), n)
+        if numbers is not None:
+            return [[window[i - 1] for i in nums] for nums in numbers]
+
+        logger.info(
+            "NewAgenticStrategy: no usable chunk starts; retrying once. Raw response: %s",
+            repr(content)[:300],
+        )
+        retry_messages = messages + [
+            {"role": "assistant", "content": content},
+            {"role": "user", "content": self._correction_prompt(n)},
+        ]
+        try:
+            content = self._invoke_and_log(retry_messages)
+            numbers = self._starts_to_groups(self._extract_json(content), n)
+        except Exception:
+            numbers = None
+
+        if numbers is None:
+            self.fallbacks += 1
+            logger.warning(
+                "NewAgenticStrategy: no usable chunk starts even after one retry; "
+                "falling back to sentence packing for %d sentence(s). Raw response: %s",
+                n, repr(content)[:300],
+            )
+            return self._pack_units(window)
+        return [[window[i - 1] for i in nums] for nums in numbers]
+
+    def _invoke_and_log(self, messages: List[dict]) -> str:
+        """One LLM call (counted, usage logged); returns the raw content."""
+        self.llm_calls += 1
+        response = self.llm.invoke(messages)
+        self._log_llm_usage(response, messages)
+        return response.content if hasattr(response, "content") else str(response)
 
     def _log_llm_usage(self, response, prompt) -> None:
         """
@@ -190,7 +227,7 @@ class NewAgenticStrategy(ChunkingStrategy):
                 input_tokens = sum(
                     estimate_tokens(str(m.get("content", ""))) for m in prompt
                 )
-                output_tokens = estimate_tokens(content)
+                output_tokens = estimate_tokens(str(content))
                 estimated = True
             if input_tokens or output_tokens:
                 from buissnes_agent.tools.rag_metrics import log_cost_usage
@@ -209,16 +246,18 @@ class NewAgenticStrategy(ChunkingStrategy):
     def _build_prompt(self, window: List[str]) -> List[dict]:
         numbered = "\n".join(f"{i + 1}. {u.strip()}" for i, u in enumerate(window))
         size_hint = (
-            f"- Aim for chunks of at most {self.chunk_size} characters where possible.\n"
+            f"- Chunks should be at most about {self.chunk_size} characters.\n"
             if self.chunk_size > 0 else ""
         )
         user = (
-            "Group the numbered sentences below into coherent topical chunks.\n"
+            "Below are numbered sentences. Decide where a NEW chunk (topic) begins.\n"
             "Rules:\n"
-            "- Every sentence number must appear exactly once.\n"
-            "- Chunks must keep the original order and be contiguous ranges.\n"
+            "- Output a JSON array of the sentence numbers that START a new chunk.\n"
+            "- The first number must be 1.\n"
+            "- Numbers must be in increasing order.\n"
             f"{size_hint}"
-            "Respond with ONLY a JSON array of arrays, e.g. [[1,2],[3,4,5]].\n\n"
+            "Example: [1, 4, 9, 15] means chunks 1-3, 4-8, 9-14 and 15-end.\n"
+            "Respond with ONLY the JSON array.\n\n"
             f"{numbered}"
         )
         return [
@@ -227,8 +266,18 @@ class NewAgenticStrategy(ChunkingStrategy):
         ]
 
     @staticmethod
+    def _correction_prompt(n: int) -> str:
+        """Follow-up after an answer with no usable numbers."""
+        return (
+            "Your previous answer could not be used.\n"
+            "Answer again with ONLY a JSON array of integers: the numbers of the "
+            f"sentences (between 1 and {n}) that start a new chunk, in increasing "
+            "order, beginning with 1. Example: [1, 4, 9]."
+        )
+
+    @staticmethod
     def _extract_json(content: Any) -> Optional[list]:
-        """Parses the first JSON array out of an LLM response (fences tolerated)."""
+        """Parses the first JSON array out of an LLM response (fences and <think> tolerated)."""
         if content is None:
             return None
         if isinstance(content, (list, tuple)):
@@ -236,7 +285,7 @@ class NewAgenticStrategy(ChunkingStrategy):
                 part.get("text", "") if isinstance(part, dict) else str(part)
                 for part in content
             )
-        text = str(content).strip()
+        text = _THINK_RE.sub("", str(content)).strip()
         if text.startswith("```"):
             text = text.strip("` \n")
             if text.lower().startswith("json"):
@@ -251,23 +300,33 @@ class NewAgenticStrategy(ChunkingStrategy):
         return parsed if isinstance(parsed, list) else None
 
     @staticmethod
-    def _validate_partition(groups: Any, n: int) -> Optional[List[List[int]]]:
-        """Valid that groups is an in-order, contiguous partition of 1..n."""
-        if not isinstance(groups, list) or not groups or n < 1:
+    def _starts_to_groups(parsed: Any, n: int) -> Optional[List[List[int]]]:
+        """
+        Builds a valid, contiguous partition of 1..n from chunk START numbers.
+
+        Tolerates messy answers: nested lists ([[1,7],[8,14]] -> starts 1, 8),
+        numeric strings, duplicates, unsorted or out-of-range numbers.
+        Sentence 1 is always a start. Returns None only if nothing usable is found.
+        """
+        if not isinstance(parsed, list) or not parsed or n < 1:
             return None
-        expected = 1
-        for group in groups:
-            if not isinstance(group, list) or not group:
-                return None
-            for num in group:
-                if isinstance(num, bool) or not isinstance(num, int):
-                    return None
-                if num != expected:
-                    return None
-                expected += 1
-        if expected != n + 1:
+        starts = set()
+        for item in parsed:
+            if isinstance(item, (list, tuple)):
+                if not item:
+                    continue
+                item = item[0]
+            if isinstance(item, str) and item.strip().isdigit():
+                item = int(item.strip())
+            if isinstance(item, bool) or not isinstance(item, int):
+                continue
+            if 1 <= item <= n:
+                starts.add(item)
+        if not starts:
             return None
-        return groups
+        starts.add(1)
+        bounds = sorted(starts) + [n + 1]
+        return [list(range(bounds[i], bounds[i + 1])) for i in range(len(bounds) - 1)]
 
     def _pack_units(self, units: List[str]) -> List[List[str]]:
         """Deterministic sentence packing within chunk_size (no overlap)."""
