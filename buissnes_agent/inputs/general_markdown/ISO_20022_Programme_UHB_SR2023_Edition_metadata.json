@@ -1,0 +1,13 @@
+{
+  "source": "s3://mojsuperbucket/general/ISO_20022_Programme_UHB_SR2023_Edition.pdf",
+  "title": "ISO_20022_Programme_UHB_SR2023_Edition.pdf",
+  "url": "s3://mojsuperbucket/general/ISO_20022_Programme_UHB_SR2023_Edition.pdf",
+  "extension": ".pdf",
+  "domain": "general",
+  "tags": [
+    "s3",
+    "general"
+  ],
+  "markdown_path": "general_markdown/ISO_20022_Programme_UHB_SR2023_Edition.md",
+  "markdown_url": "https://mojsuperbucket.s3.amazonaws.com/general_markdown/ISO_20022_Programme_UHB_SR2023_Edition.md"
+}

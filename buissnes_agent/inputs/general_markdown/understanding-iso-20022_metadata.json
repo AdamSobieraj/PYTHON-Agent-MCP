@@ -1,0 +1,13 @@
+{
+  "source": "s3://mojsuperbucket/general/understanding-iso-20022.pdf",
+  "title": "understanding-iso-20022.pdf",
+  "url": "s3://mojsuperbucket/general/understanding-iso-20022.pdf",
+  "extension": ".pdf",
+  "domain": "general",
+  "tags": [
+    "s3",
+    "general"
+  ],
+  "markdown_path": "general_markdown/understanding-iso-20022.md",
+  "markdown_url": "https://mojsuperbucket.s3.amazonaws.com/general_markdown/understanding-iso-20022.md"
+}

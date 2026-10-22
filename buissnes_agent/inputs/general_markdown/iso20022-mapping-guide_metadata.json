@@ -1,0 +1,13 @@
+{
+  "source": "s3://mojsuperbucket/general/iso20022-mapping-guide.pdf",
+  "title": "iso20022-mapping-guide.pdf",
+  "url": "s3://mojsuperbucket/general/iso20022-mapping-guide.pdf",
+  "extension": ".pdf",
+  "domain": "general",
+  "tags": [
+    "s3",
+    "general"
+  ],
+  "markdown_path": "general_markdown/iso20022-mapping-guide.md",
+  "markdown_url": "https://mojsuperbucket.s3.amazonaws.com/general_markdown/iso20022-mapping-guide.md"
+}

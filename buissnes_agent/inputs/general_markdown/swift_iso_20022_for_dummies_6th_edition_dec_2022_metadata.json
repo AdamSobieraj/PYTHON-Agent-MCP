@@ -1,0 +1,13 @@
+{
+  "source": "s3://mojsuperbucket/general/swift_iso_20022_for_dummies_6th_edition_dec_2022.pdf",
+  "title": "swift_iso_20022_for_dummies_6th_edition_dec_2022.pdf",
+  "url": "s3://mojsuperbucket/general/swift_iso_20022_for_dummies_6th_edition_dec_2022.pdf",
+  "extension": ".pdf",
+  "domain": "general",
+  "tags": [
+    "s3",
+    "general"
+  ],
+  "markdown_path": "general_markdown/swift_iso_20022_for_dummies_6th_edition_dec_2022.md",
+  "markdown_url": "https://mojsuperbucket.s3.amazonaws.com/general_markdown/swift_iso_20022_for_dummies_6th_edition_dec_2022.md"
+}

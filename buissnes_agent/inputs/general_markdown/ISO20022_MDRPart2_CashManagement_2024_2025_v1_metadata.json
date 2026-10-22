@@ -1,0 +1,13 @@
+{
+  "source": "s3://mojsuperbucket/general/ISO20022_MDRPart2_CashManagement_2024_2025_v1.pdf",
+  "title": "ISO20022_MDRPart2_CashManagement_2024_2025_v1.pdf",
+  "url": "s3://mojsuperbucket/general/ISO20022_MDRPart2_CashManagement_2024_2025_v1.pdf",
+  "extension": ".pdf",
+  "domain": "general",
+  "tags": [
+    "s3",
+    "general"
+  ],
+  "markdown_path": "general_markdown/ISO20022_MDRPart2_CashManagement_2024_2025_v1.md",
+  "markdown_url": "https://mojsuperbucket.s3.amazonaws.com/general_markdown/ISO20022_MDRPart2_CashManagement_2024_2025_v1.md"
+}

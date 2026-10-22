@@ -1,0 +1,13 @@
+{
+  "source": "s3://mojsuperbucket/general/mappings_stds_mt_mx_eq_tbl.pdf",
+  "title": "mappings_stds_mt_mx_eq_tbl.pdf",
+  "url": "s3://mojsuperbucket/general/mappings_stds_mt_mx_eq_tbl.pdf",
+  "extension": ".pdf",
+  "domain": "general",
+  "tags": [
+    "s3",
+    "general"
+  ],
+  "markdown_path": "general_markdown/mappings_stds_mt_mx_eq_tbl.md",
+  "markdown_url": "https://mojsuperbucket.s3.amazonaws.com/general_markdown/mappings_stds_mt_mx_eq_tbl.md"
+}

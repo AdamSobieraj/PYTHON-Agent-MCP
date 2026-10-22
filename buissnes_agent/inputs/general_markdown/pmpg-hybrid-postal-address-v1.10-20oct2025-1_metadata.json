@@ -1,0 +1,13 @@
+{
+  "source": "s3://mojsuperbucket/general/pmpg-hybrid-postal-address-v1.10-20oct2025-1.pdf",
+  "title": "pmpg-hybrid-postal-address-v1.10-20oct2025-1.pdf",
+  "url": "s3://mojsuperbucket/general/pmpg-hybrid-postal-address-v1.10-20oct2025-1.pdf",
+  "extension": ".pdf",
+  "domain": "general",
+  "tags": [
+    "s3",
+    "general"
+  ],
+  "markdown_path": "general_markdown/pmpg-hybrid-postal-address-v1.10-20oct2025-1.md",
+  "markdown_url": "https://mojsuperbucket.s3.amazonaws.com/general_markdown/pmpg-hybrid-postal-address-v1.10-20oct2025-1.md"
+}
