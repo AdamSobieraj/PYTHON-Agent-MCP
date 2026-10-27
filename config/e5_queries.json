@@ -1,0 +1,133 @@
+{
+  "note": "E5 ground truth, kurated manually against the ACTUAL corpus (buissnes_agent/inputs/general_markdown, 13 documents). expected_sources are case-insensitive substrings matched against the chunk payload fields (source, title, markdown_path, url, markdown_url) - i.e. document base names. Curation rule: a document is relevant if it substantively covers the queried message/topic (verified by content scan; incidental one-off mentions excluded). Corpus facts that shaped the query set: pmt.009/pmt.002 are ABSENT (customer-side messages are pain.001/pain.002); camt.059/camt.028 are ABSENT (statements: camt.052/053/054, reconciliation: camt.029); 'Core Business Process 2' and 'onboarding' are ABSENT (replaced by pain.008 and the hybrid postal address topic). Code spellings vary in the corpus (pacs.002 with a dot vs pacs002) - queries use the dotted form, which appears everywhere the code appears.",
+  "queries": [
+    {
+      "id": "q01",
+      "query": "Jakie dane muszą znaleźć się w wiadomości pain.001 (polecenie przelewu od klienta, format MX)?",
+      "expected_sources": [
+        "mdrpart1_paymentsinitiation",
+        "mdrpart2_paymentsinitiation",
+        "programme_uhb",
+        "pmpg-hybrid-postal-address"
+      ]
+    },
+    {
+      "id": "q02",
+      "query": "Czym wiadomość pacs.002 różni się od pacs.008 i kiedy stosuje się każdą z nich?",
+      "expected_sources": [
+        "mdrpart1_paymentsclearingandsettlement",
+        "mdrpart2_paymentsclearingandsettlement",
+        "programme_uhb",
+        "iso20022-mapping-guide",
+        "pmpg-hybrid-postal-address"
+      ]
+    },
+    {
+      "id": "q03",
+      "query": "Jak odczytać saldo i transakcje z wyciągu bankowego camt.052?",
+      "expected_sources": [
+        "programme_uhb",
+        "iso20022-mapping-guide"
+      ]
+    },
+    {
+      "id": "q04",
+      "query": "Co zawiera raport kontowy camt.053, który bank wysyła do klienta?",
+      "expected_sources": [
+        "programme_uhb",
+        "iso20022-mapping-guide"
+      ]
+    },
+    {
+      "id": "q05",
+      "query": "Jak mapować pola wiadomości SWIFT MT 103 na odpowiedniki w formacie MX (ISO 20022)?",
+      "expected_sources": [
+        "iso20022-mapping-guide",
+        "pmpg-hybrid-postal-address",
+        "programme_uhb",
+        "swift_iso_20022_for_dummies"
+      ]
+    },
+    {
+      "id": "q06",
+      "query": "Opisz ogólną strukturę wiadomości ISO 20022 i jej elementy strukturalne.",
+      "expected_sources": [
+        "swift_iso_20022_for_dummies",
+        "understanding-iso-20022"
+      ]
+    },
+    {
+      "id": "q07",
+      "query": "Jakie dane zawiera polecenie stałego zlecenia (standing order) w formacie pain.008?",
+      "expected_sources": [
+        "mdrpart1_paymentsinitiation",
+        "mdrpart2_paymentsinitiation",
+        "programme_uhb",
+        "pmpg-hybrid-postal-address"
+      ]
+    },
+    {
+      "id": "q08",
+      "query": "Czy formaty MT i MX mogą współistnieć w bankowości i jak przebiega przejście między nimi?",
+      "expected_sources": [
+        "swift_iso_20022_for_dummies",
+        "programme_uhb",
+        "pmpg-hybrid-postal-address",
+        "introtoiso20022"
+      ]
+    },
+    {
+      "id": "q09",
+      "query": "Jakie informacje o saldach na koniec dnia zawiera wiadomość camt.054?",
+      "expected_sources": [
+        "programme_uhb",
+        "iso20022-mapping-guide"
+      ]
+    },
+    {
+      "id": "q10",
+      "query": "Jak banki rozliczają (reconcile) transakcje za pomocą zapytań camt.029 w ISO 20022?",
+      "expected_sources": [
+        "programme_uhb",
+        "iso20022-mapping-guide"
+      ]
+    },
+    {
+      "id": "q11",
+      "query": "Jak bank komunikuje status wykonania polecenia przelewu w wiadomości pain.002?",
+      "expected_sources": [
+        "mdrpart1_paymentsinitiation",
+        "mdrpart2_paymentsinitiation",
+        "programme_uhb"
+      ]
+    },
+    {
+      "id": "q12",
+      "query": "Jak działa walidacja (MVAL) wiadomości XML w usłudze FinPlus przed wysłaniem przez system SWIFT?",
+      "expected_sources": [
+        "programme_uhb"
+      ]
+    },
+    {
+      "id": "q13",
+      "query": "Jak sformatować hybrydowy adres pocztowy (kraj + kod pocztowy + ulica) w elementach adresowych wiadomości ISO 20022?",
+      "expected_sources": [
+        "pmpg-hybrid-postal-address",
+        "programme_uhb"
+      ]
+    },
+    {
+      "id": "q14",
+      "query": "What is the difference between a customer credit transfer initiation (pain.001) and a bank credit transfer instruction (pacs.008)?",
+      "expected_sources": [
+        "mdrpart1_paymentsinitiation",
+        "mdrpart2_paymentsinitiation",
+        "mdrpart1_paymentsclearingandsettlement",
+        "mdrpart2_paymentsclearingandsettlement",
+        "programme_uhb",
+        "pmpg-hybrid-postal-address",
+        "iso20022-mapping-guide"
+      ]
+    }
+  ]
+}
