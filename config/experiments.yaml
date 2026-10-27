@@ -46,3 +46,19 @@ e4:
   fault_strategy_map:
     llm_failure: "agentic"
     embedding_failure: "semanticChunker"
+
+# E5: retrieval A/B - dense (pure vector) vs hybrid (dense + sparse BM25, RRF)
+# on ONE collection (ingested once, both arms query the same chunks).
+# Requires Qdrant (QDRANT_API) - hybrid search runs inside the database.
+e5:
+  collection: e5_retrieval
+  # chunking strategy for the E5 corpus (base parameters: size/overlap above)
+  strategy: fixedSize
+  # query set with ground truth (expected_sources = case-insensitive
+  # substrings matched against the chunk payload's source fields)
+  queries_file: config/e5_queries.json
+  top_k: 10
+  # how deep each leg (dense, sparse) fetches before the RRF fusion
+  prefetch_limit: 50
+  # true: re-ingest the collection + rebuild the BM25 index on every run
+  rebuild: true

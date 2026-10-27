@@ -90,7 +90,8 @@ class IMetricsRepository(ABC):
             self,
             limit: int = 100,
             collection_name: Optional[str] = None,
-            hours: Optional[int] = None
+            hours: Optional[int] = None,
+            strategy: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Get retrieval metrics
@@ -99,6 +100,7 @@ class IMetricsRepository(ABC):
             limit: Maximum number of records
             collection_name: Filter by collection (optional)
             hours: Get only the last N hours (optional)
+            strategy: Filter by retrieval strategy (dense/hybrid, E5)
 
         Returns:
             List[Dict]: List of metrics as dictionaries

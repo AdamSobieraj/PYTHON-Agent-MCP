@@ -49,8 +49,16 @@ class CostMetrics:
         return json.dumps(self.to_dict())
 
 
+@dataclass
 class RetrievalMetrics:
-    """Metrics for the retrieval phase"""
+    """
+    Metrics for the retrieval phase.
+
+    strategy: "dense" (pure vector) or "hybrid"
+    (dense + sparse BM25 fused with RRF) -- A/B label for experiment E5.
+    retrieved_ids: IDs of the retrieved points (top-k),
+    used for post-hoc Recall@k evaluation.
+    """
     query: str
     collection_name: str
     num_results: int
@@ -60,6 +68,8 @@ class RetrievalMetrics:
     timestamp: str
     embedding_latency_ms: Optional[int] = None
     search_latency_ms: Optional[int] = None
+    strategy: str = "dense"
+    retrieved_ids: Optional[List[str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

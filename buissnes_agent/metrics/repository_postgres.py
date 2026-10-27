@@ -64,6 +64,8 @@ POSTGRES_SCHEMA = """
                       latency_ms INTEGER NOT NULL,
                       embedding_latency_ms INTEGER,
                       search_latency_ms INTEGER,
+                      strategy VARCHAR(64) NOT NULL DEFAULT 'dense',
+                      retrieved_ids TEXT[],
                       timestamp TIMESTAMP NOT NULL DEFAULT NOW \
                   ( \
                   ),
@@ -72,9 +74,16 @@ POSTGRES_SCHEMA = """
                   )
                       );
 
+                  -- Migration for existing databases (no-op on new tables):
+                  -- strategy labels the A/B retrieval experiment E5
+                  -- (dense vs hybrid), retrieved_ids enables post-hoc Recall@k.
+                  ALTER TABLE rag_retrieval_metrics ADD COLUMN IF NOT EXISTS strategy VARCHAR(64) NOT NULL DEFAULT 'dense';
+                  ALTER TABLE rag_retrieval_metrics ADD COLUMN IF NOT EXISTS retrieved_ids TEXT[];
+
                   CREATE INDEX IF NOT EXISTS idx_retrieval_timestamp ON rag_retrieval_metrics(timestamp);
                   CREATE INDEX IF NOT EXISTS idx_retrieval_collection ON rag_retrieval_metrics(collection_name);
                   CREATE INDEX IF NOT EXISTS idx_retrieval_created_at ON rag_retrieval_metrics(created_at);
+                  CREATE INDEX IF NOT EXISTS idx_retrieval_strategy ON rag_retrieval_metrics(strategy);
 
 -- Tabela dla metryk generation
                   CREATE TABLE IF NOT EXISTS rag_generation_metrics \
@@ -280,10 +289,12 @@ class PostgresMetricsRepository(IMetricsRepository):
         query = """
                 INSERT INTO rag_retrieval_metrics
                 (query, collection_name, num_results, top_scores, avg_score,
-                 latency_ms, embedding_latency_ms, search_latency_ms, timestamp)
+                 latency_ms, embedding_latency_ms, search_latency_ms,
+                 strategy, retrieved_ids, timestamp)
                 VALUES (%(query)s, %(collection_name)s, %(num_results)s, %(top_scores)s,
                         %(avg_score)s, %(latency_ms)s, %(embedding_latency_ms)s,
-                        %(search_latency_ms)s, %(timestamp)s) RETURNING id; \
+                        %(search_latency_ms)s, %(strategy)s, %(retrieved_ids)s,
+                        %(timestamp)s) RETURNING id; \
                 """
 
         try:
@@ -370,9 +381,13 @@ class PostgresMetricsRepository(IMetricsRepository):
             self,
             limit: int = 100,
             collection_name: Optional[str] = None,
-            hours: Optional[int] = None
+            hours: Optional[int] = None,
+            strategy: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Implementation: get retrieval metrics"""
+        """Implementation: get retrieval metrics
+
+        strategy: optional filter on the A/B label ("dense"/"hybrid").
+        """
         query = """
                 SELECT id, \
                        query, \
@@ -382,7 +397,8 @@ class PostgresMetricsRepository(IMetricsRepository):
                        avg_score,
                        latency_ms, \
                        embedding_latency_ms, \
-                       search_latency_ms, timestamp
+                       search_latency_ms, \
+                       strategy, retrieved_ids, timestamp
                 FROM rag_retrieval_metrics
                 WHERE 1=1 \
                 """
@@ -392,6 +408,10 @@ class PostgresMetricsRepository(IMetricsRepository):
         if collection_name:
             query += " AND collection_name = %s"
             params.append(collection_name)
+
+        if strategy:
+            query += " AND strategy = %s"
+            params.append(strategy)
 
         if hours:
             query += " AND timestamp > NOW() - INTERVAL '%s hours'"

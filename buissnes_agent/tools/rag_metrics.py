@@ -53,13 +53,19 @@ class MetricsCalculator:
         return [point.score for point in points]
 
     @staticmethod
+    def extract_point_ids(points) -> List[str]:
+        """IDs of the retrieved points (for post-hoc Recall@k evaluation)."""
+        return [str(point.id) for point in points]
+
+    @staticmethod
     def create_retrieval_metrics(
             query: str,
             collection_name: str,
             points,
             total_latency_ms: int,
             embedding_latency_ms: Optional[int] = None,
-            search_latency_ms: Optional[int] = None
+            search_latency_ms: Optional[int] = None,
+            strategy: str = "dense"
     ) -> RetrievalMetrics:
         """Factory method for RetrievalMetrics"""
         top_scores = MetricsCalculator.extract_top_scores(points) if points else []
@@ -74,6 +80,8 @@ class MetricsCalculator:
             latency_ms=total_latency_ms,
             embedding_latency_ms=embedding_latency_ms,
             search_latency_ms=search_latency_ms,
+            strategy=strategy,
+            retrieved_ids=MetricsCalculator.extract_point_ids(points) if points else [],
             timestamp=datetime.now().isoformat()
         )
 
@@ -81,7 +89,8 @@ class MetricsCalculator:
     def create_error_metrics(
             query: str,
             collection_name: str,
-            latency_ms: int
+            latency_ms: int,
+            strategy: str = "dense"
     ) -> RetrievalMetrics:
         """Factory method for error metrics"""
         return RetrievalMetrics(
@@ -91,6 +100,7 @@ class MetricsCalculator:
             top_scores=[],
             avg_score=0.0,
             latency_ms=latency_ms,
+            strategy=strategy,
             timestamp=datetime.now().isoformat()
         )
 

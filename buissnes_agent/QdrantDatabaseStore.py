@@ -2,7 +2,13 @@ import logging
 import uuid
 from typing import List, Dict, Any
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, PointStruct, Distance
+from qdrant_client.models import (
+    VectorParams,
+    SparseVectorParams,
+    SparseVector,
+    PointStruct,
+    Distance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -14,19 +20,45 @@ class QdrantDatabaseStore:
         self._ensure_collection()
 
     def _ensure_collection(self):
-        """Creates the collection only if it does not exist."""
+        """Creates the collection only if it does not exist.
+
+        New schema: named dense vector ("dense") + named sparse vector
+        ("sparse", BM25 weights computed in the application -- see
+        buissnes_agent/Bm25Index.py). The sparse config allows hybrid
+        queries (prefetch + RRF); collections without sparse weights
+        simply work in pure vector mode.
+        """
         try:
             if not self.client.collection_exists(self.collection_name):
                 logger.info(f"Tworzenie kolekcji: {self.collection_name} (dim: {self.vector_size})")
                 self.client.create_collection(
                     collection_name=self.collection_name,
-                    vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
+                    vectors_config={
+                        "dense": VectorParams(size=self.vector_size, distance=Distance.COSINE)
+                    },
+                    sparse_vectors_config={
+                        "sparse": SparseVectorParams()
+                    },
                 )
             else:
                 logger.info(f"Kolekcja {self.collection_name} już istnieje.")
         except Exception as e:
             logger.error(f"Błąd inicjalizacji Qdrant: {e}")
             raise
+
+    def dense_vector_name(self):
+        """Returns the name of the dense vector in the collection schema,
+        or None if the collection was created with the old schema
+        (a single unnamed vector)."""
+        try:
+            info = self.client.get_collection(self.collection_name)
+            vectors = info.config.params.vectors
+            if isinstance(vectors, dict):
+                return "dense"
+            return None
+        except Exception as e:
+            logger.warning(f"Nie udało się odczytać schematu kolekcji: {e}")
+            return None
 
     def count(self) -> int:
         """Returns the number of vectors in the collection."""
@@ -67,10 +99,19 @@ class QdrantDatabaseStore:
             if "phrase" not in payload:
                 payload["phrase"] = item.get("text", "")
 
-            # 3. Create the point
+            # 3. Create the point (named vectors: dense + optional sparse)
+            # The sparse vector (BM25 weights) is optional -- when absent,
+            # the point works in pure vector mode.
+            vector: Dict[str, Any] = {"dense": item["vector"]}
+            sparse = item.get("sparse")
+            if sparse is not None:
+                vector["sparse"] = SparseVector(
+                    indices=list(sparse.get("indices", [])),
+                    values=list(sparse.get("values", [])),
+                )
             points.append(PointStruct(
                 id=point_id,
-                vector=item["vector"],
+                vector=vector,
                 payload=payload
             ))
 
@@ -86,12 +127,17 @@ class QdrantDatabaseStore:
         Updated to support the new schema ('phrase' and 'metadata').
         """
         try:
-            results = self.client.search(
+            query_kwargs = {}
+            dense_name = self.dense_vector_name()
+            if dense_name is not None:
+                query_kwargs["using"] = dense_name
+            results = self.client.query_points(
                 collection_name=self.collection_name,
-                query_vector=query_vector,
+                query=query_vector,
                 limit=limit,
                 with_payload=True,
-            )
+                **query_kwargs,
+            ).points
 
             output = []
             for p in results:

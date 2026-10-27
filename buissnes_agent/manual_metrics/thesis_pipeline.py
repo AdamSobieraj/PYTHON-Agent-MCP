@@ -1,5 +1,5 @@
 """
-Thesis pipeline: experiments E1-E4 -> statistics -> export, in one go.
+Thesis pipeline: experiments E1-E5 -> statistics -> export, in one go.
 
 This is a manual, opt-in orchestration (never triggered by the
 normal application flow):
@@ -10,11 +10,14 @@ normal application flow):
     python -m buissnes_agent.manual_metrics.thesis_pipeline --out results/run1
 
 Steps:
-    1. run the selected experiments (E1-E4) through the full pipeline
-       (per-document rows land in rag_chunking_metrics),
+    1. run the selected experiments (E1-E4 chunking rows land in the
+       metrics DB; E5 = retrieval A/B dense vs hybrid, results land in
+       results/e5_results.json),
     2. load the experiment rows from the metrics DB and compute,
        per metric: mean/std/95% bootstrap CI per strategy +
-       pairwise Wilcoxon tests (paired per document),
+       pairwise Wilcoxon tests (paired per document); E5: per-arm
+       Hit@k/Recall@k/MRR + paired Wilcoxon (per query, fallbacks
+       excluded),
     3. export per-metric CSV + LaTeX tables and a run log
        into the output directory.
 
@@ -45,10 +48,12 @@ from buissnes_agent.manual_metrics.run_experiments import (
     _load_experiments_config,
 )
 from buissnes_agent.manual_metrics.statistics import (
+    bootstrap_ci,
     export_csv,
     latency_table,
     summary_table,
     to_latex_table,
+    wilcoxon_test,
 )
 
 # Default metrics summarized per strategy (chapter 4: quality + cost/time)
@@ -308,6 +313,220 @@ def _analyze_latencies(
     return {"written": written, "tables": result}
 
 
+# ==============================================================================
+# E5: retrieval A/B (dense vs hybrid) - analysis of results/e5_results.json
+# ==============================================================================
+E5_ARMS = ("dense", "hybrid")
+
+
+def _analyze_e5(out_dir: str) -> Optional[Dict[str, Any]]:
+    """
+    E5: dense vs hybrid retrieval - per-arm quality + paired comparison.
+
+    Reads results/e5_results.json (written by run_experiments.run_e5):
+    per-query retrieved IDs already scored against the ground truth.
+    Exports:
+        e5_retrieval_table.tex   - Hit@k / Recall@k (95% CI) / MRR per arm
+                                   + Wilcoxon p-values (paired per query),
+        e5_retrieval_summary.csv - the same numbers as CSV,
+        e5_latency_table.tex     - p50/p95/p99 from the metrics DB rows
+                                   (strategy = dense/hybrid, E5 collection).
+
+    Queries where a requested arm fell back to the other strategy are
+    excluded from the pairing (fallbacks are counted separately).
+    """
+    results_path = os.path.join(_PROJECT_ROOT, "results", "e5_results.json")
+    if not os.path.exists(results_path):
+        print("[E5] brak results/e5_results.json - pomijam analize "
+              "(najpierw uruchom eksperyment E5)")
+        return None
+
+    with open(results_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    collection = data.get("collection", "")
+    top_k = data.get("top_k", 10)
+    queries: List[Dict[str, Any]] = data.get("queries", [])
+    written: List[str] = []
+
+    def _fmt(value: Optional[float], digits: int = 3) -> str:
+        return f"{value:.{digits}f}" if value is not None else "-"
+
+    # --- per-arm quality (only the queries the arm ACTUALLY ran) ---
+    per_arm: Dict[str, Any] = {}
+    for arm in E5_ARMS:
+        rows = [
+            q["arms"][arm] for q in queries
+            if q["arms"][arm]["strategy_used"] == arm
+        ]
+        recalls = [r["recall"] for r in rows if r["recall"] is not None]
+        per_arm[arm] = {
+            "n_ran": len(rows),
+            "n_fallback": len(queries) - len(rows),
+            "hit_rate": (
+                sum(1 for r in rows if r["hit"]) / len(rows)
+            ) if rows else None,
+            "recall_mean": (sum(recalls) / len(recalls)) if recalls else None,
+            "recall_ci95": bootstrap_ci(recalls) if len(recalls) >= 2 else None,
+            "mrr_mean": (
+                sum(r["mrr"] for r in rows) / len(rows)
+            ) if rows else None,
+            "search_latency_mean_ms": (
+                sum(r["search_latency_ms"] for r in rows) / len(rows)
+            ) if rows else None,
+        }
+
+    # --- paired comparison dense vs hybrid (fallbacks excluded) ---
+    recall_pairs: List[tuple] = []
+    latency_pairs: List[tuple] = []
+    for q in queries:
+        d, h = q["arms"]["dense"], q["arms"]["hybrid"]
+        if d["strategy_used"] != "dense" or h["strategy_used"] != "hybrid":
+            continue
+        if d["recall"] is not None and h["recall"] is not None:
+            recall_pairs.append((d["recall"], h["recall"]))
+        latency_pairs.append((d["search_latency_ms"], h["search_latency_ms"]))
+
+    def _paired_test(pairs: List[tuple]) -> Dict[str, Any]:
+        if len(pairs) < 2:
+            return {
+                "statistic": None, "p_value": None,
+                "note": f"tylko {len(pairs)} par zapytan - test pominiety",
+            }
+        return wilcoxon_test([p[0] for p in pairs], [p[1] for p in pairs])
+
+    wilcoxon = {
+        "recall": _paired_test(recall_pairs),
+        "search_latency_ms": _paired_test(latency_pairs),
+    }
+    n_paired = len(latency_pairs)
+
+    # --- LaTeX: retrieval quality ---
+    lines = [
+        r"\begin{table}[H]",
+        r"\centering",
+        rf"\caption{{E5: retrieval quality, top-{top_k} "
+        rf"(corpus: {collection}, {data.get('chunks', '-')} chunks, "
+        rf"{len(queries)} queries)}}",
+        r"\small",
+        r"\begin{tabular}{@{}lrrrl@{}}",
+        r"\toprule",
+        r"\textbf{Strategy} & \textbf{Hit@k}"
+        r" & \textbf{Recall@k} & \textbf{MRR} & \textbf{Recall@k CI 95\%} \\",
+        r"\midrule",
+    ]
+    for arm in E5_ARMS:
+        row = per_arm[arm]
+        ci = row["recall_ci95"]
+        ci_str = f"[{ci[0]:.3f}; {ci[1]:.3f}]" if ci else "-"
+        lines.append(
+            f"\\textbf{{{arm}}} & {_fmt(row['hit_rate'])}"
+            f" & {_fmt(row['recall_mean'])} & {_fmt(row['mrr_mean'])}"
+            f" & {ci_str} \\\\"
+        )
+    lines.append(r"\midrule")
+    for key, label in (
+            ("recall", f"Recall@{top_k}"),
+            ("search_latency_ms", "czas wyszukiwania"),
+    ):
+        res = wilcoxon[key]
+        p = res.get("p_value")
+        if p is not None:
+            sig = f"p = {p:.4f}" + (
+                " (istotne, $\\alpha = 0{,}05$)" if p < 0.05
+                else " (n. istotne)"
+            )
+        else:
+            sig = res.get("note", "-")
+        note = f"Wilcoxon signed-rank (pary per zapytanie): {label} - {sig}"
+        lines.append(rf"\multicolumn{{5}}{{@{{}}l}}{{{note}}} \\")
+    lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+
+    tex_path = os.path.join(out_dir, "e5_retrieval_table.tex")
+    with open(tex_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    written.append(tex_path)
+
+    # --- CSV ---
+    csv_path = os.path.join(out_dir, "e5_retrieval_summary.csv")
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "strategy", "n_ran", "n_fallback", "hit_rate", "recall_mean",
+            "recall_ci95_low", "recall_ci95_high", "mrr_mean",
+            "search_latency_mean_ms",
+        ])
+        for arm in E5_ARMS:
+            row = per_arm[arm]
+            ci = row["recall_ci95"] or (None, None)
+            writer.writerow([
+                arm, row["n_ran"], row["n_fallback"],
+                row["hit_rate"], row["recall_mean"],
+                ci[0], ci[1],
+                row["mrr_mean"], row["search_latency_mean_ms"],
+            ])
+    written.append(csv_path)
+
+    # --- LaTeX: latencies from the metrics DB (strategy rows) ---
+    db_table: Optional[Dict[str, Any]] = None
+    try:
+        repo = get_repository()
+        rows_db = [
+            r for r in repo.get_retrieval_metrics(
+                limit=10000, collection_name=collection
+            )
+            if r.get("strategy") in E5_ARMS
+        ]
+        if rows_db:
+            db_table = latency_table(
+                rows_db, QUERY_LATENCY_FIELDS,
+                group_key="strategy", group_all="E5",
+            )
+            tex_path = os.path.join(out_dir, "e5_latency_table.tex")
+            with open(tex_path, "w", encoding="utf-8") as f:
+                f.write(
+                    _latency_to_latex(
+                        db_table,
+                        "E5: retrieval latencies (ms) per strategy "
+                        "(p50 / p95 / p99, per query)",
+                        group_header="Strategy",
+                    )
+                    + "\n"
+                )
+            written.append(tex_path)
+    except Exception as e:
+        print(f"[E5] odczyt metryk z bazy nieudany ({e}) - "
+              f"pominam tabela latencji")
+
+    print(
+        "[E5] "
+        + ", ".join(
+            f"{arm}: hit={_fmt(per_arm[arm]['hit_rate'])} "
+            f"recall={_fmt(per_arm[arm]['recall_mean'])} "
+            f"mrr={_fmt(per_arm[arm]['mrr_mean'])} "
+            f"(n={per_arm[arm]['n_ran']}, "
+            f"fallback={per_arm[arm]['n_fallback']})"
+            for arm in E5_ARMS
+        )
+    )
+    for name, res in wilcoxon.items():
+        p = res.get("p_value")
+        sig = f"p={p:.4f}" if p is not None else res.get("note", "n/d")
+        print(f"[E5][wilcoxon] {name}: {sig}")
+
+    return {
+        "experiment_id": data.get("experiment_id"),
+        "collection": collection,
+        "top_k": top_k,
+        "n_queries": len(queries),
+        "n_paired": n_paired,
+        "per_arm": per_arm,
+        "wilcoxon": wilcoxon,
+        "db_latency": db_table,
+        "written": written,
+    }
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     load_dotenv()
 
@@ -316,7 +535,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--exp", default="all",
-        help="experiments to run: all or comma-separated E1,E2,E3,E4 "
+        help="experiments to run: all or comma-separated E1,E2,E3,E4,E5 "
              "(default: all)"
     )
     parser.add_argument(
@@ -371,17 +590,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     # 2) statistics from the metrics DB (experiment rows only)
     print("\n=== STATISTICS ===")
     records = _load_experiment_records()
+    result: Dict[str, Any] = {"summaries": {}, "written": []}
     if not records:
-        print("No experiment rows in the metrics database - "
-              "run the experiments first (drop --skip-experiments).")
-        return 1
-    print(f"[stats] loaded {len(records)} experiment records "
-          f"(experiments: {sorted({r.get('experiment_id') for r in records})})")
-    result = _analyze(records, metrics, out_dir)
+        if "E5" in names:
+            print("No chunking rows in the metrics database - "
+                  "skipping the E1-E4 statistics "
+                  "(E5 is analyzed from results/e5_results.json).")
+        else:
+            print("No experiment rows in the metrics database - "
+                  "run the experiments first (drop --skip-experiments).")
+            return 1
+    else:
+        print(f"[stats] loaded {len(records)} experiment records "
+              f"(experiments: {sorted({r.get('experiment_id') for r in records})})")
+        result = _analyze(records, metrics, out_dir)
 
     # 2b) latency percentiles p50/p95/p99 (chapter 4 time metrics)
     print("\n=== LATENCY PERCENTILES (p50/p95/p99) ===")
-    latency_result = _analyze_latencies(records, out_dir)
+    latency_result = (
+        _analyze_latencies(records, out_dir)
+        if records else {"written": [], "tables": {}}
+    )
+
+    # 2c) E5: retrieval A/B (dense vs hybrid)
+    print("\n=== E5: RETRIEVAL A/B (dense vs hybrid) ===")
+    e5_result = _analyze_e5(out_dir) if "E5" in names else None
 
     # 3) run log
     log_path = os.path.join(out_dir, "run_log.json")
@@ -395,15 +628,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "records_analyzed": len(records),
                 "summaries": result["summaries"],
                 "latency": latency_result["tables"],
+                "e5": e5_result,
                 "exported_files": result["written"]
-                + latency_result["written"] + [log_path],
+                + latency_result["written"]
+                + (e5_result["written"] if e5_result else [])
+                + [log_path],
             },
             f,
             indent=2,
             ensure_ascii=False,
         )
 
-    print(f"\n= PIPELINE DONE. {len(result['written']) + 1} files "
+    n_files = (
+        len(result["written"]) + len(latency_result["written"])
+        + (len(e5_result["written"]) if e5_result else 0)
+    )
+    print(f"\n= PIPELINE DONE. {n_files + 1} files "
           f"in: {os.path.abspath(out_dir)} =")
     return 0
 

@@ -1,10 +1,13 @@
 """
-Runner for experiments E1-E4 (chapter 4, "Experiment plan").
+Runner for experiments E1-E5 (chapter 4, "Experiment plan").
 
 E1: chunking quality comparison for four strategies,
 E2: cost and processing-time comparison,
 E3: size x overlap parameter ablation,
-E4: system resilience to failures (LLM / embedding endpoint).
+E4: system resilience to failures (LLM / embedding endpoint),
+E5: retrieval A/B - dense (pure vector) vs hybrid (dense + sparse BM25,
+    RRF fusion) on ONE collection; Hit@k / Recall@k / MRR against a
+    query set with ground truth (config/e5_queries.json).
 
 Each run goes through the full SearchKnowledgebase pipeline
 (load -> chunk -> embed -> store); per-document results
@@ -406,11 +409,277 @@ def run_e4(cfg: Dict[str, Any], dataset_path: str,
     return results
 
 
+# ==============================================================================
+# E5: RETRIEVAL A/B (dense vs hybrid BM25+RRF)
+# ==============================================================================
+# Both arms query the SAME collection (ingested once): the metric rows are
+# distinguished by the "strategy" column (dense/hybrid) in the metrics DB,
+# and the per-query results (retrieved IDs + ground truth match) are saved
+# to results/e5_results.json for the thesis analysis (thesis_pipeline).
+E5_STRATEGIES = ("dense", "hybrid")
+
+# Payload fields used to match a chunk against the expected sources
+# (ground truth = case-insensitive substring, any field).
+E5_SOURCE_FIELDS = ("source", "title", "markdown_path", "url", "markdown_url")
+
+
+def _load_e5_queries(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Load the E5 query set (config/e5_queries.json)."""
+    e5 = cfg.get("e5", {})
+    queries_path = e5.get("queries_file", "config/e5_queries.json")
+    if not os.path.isabs(queries_path):
+        queries_path = os.path.join(PROJECT_ROOT, queries_path)
+    with open(queries_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    queries = data.get("queries", [])
+    for i, q in enumerate(queries, 1):
+        q.setdefault("id", f"q{i:02d}")
+        q["expected_sources"] = [
+            s.lower() for s in q.get("expected_sources", [])
+        ]
+    return queries
+
+
+def _e5_source_matches(payload: Dict[str, Any],
+                       expected: List[str]) -> bool:
+    """
+    Ground truth: does any expected substring occur (case-insensitive)
+    in any of the chunk's source payload fields?
+    """
+    if not expected:
+        return False
+    haystack = " ".join(
+        str(payload.get(field) or "") for field in E5_SOURCE_FIELDS
+    ).lower()
+    return any(needle in haystack for needle in expected)
+
+
+def run_e5(cfg: Dict[str, Any], dataset_path: str) -> Dict[str, Any]:
+    """
+    E5: dense vs hybrid retrieval on one corpus.
+
+    1. (re)build the collection through SearchKnowledgebase (new schema:
+       named "dense" vector + "sparse" BM25 placeholder),
+    2. build the BM25 sparse index (post-ingestion pass),
+    3. run the query set for BOTH arms via run_generic_rag_with_metrics,
+    4. score each arm against the ground truth (Hit@k / Recall@k / MRR)
+       from the retrieved point IDs,
+    5. save results/e5_results.json (thesis_pipeline._analyze_e5 reads it).
+
+    Requires Qdrant (QDRANT_API) and the metrics repository
+    (METRICS_STORAGE_TYPE) - the retrieved IDs are carried by the
+    retrieval metrics row.
+    """
+    e5 = cfg.get("e5", {})
+    collection = e5.get("collection", "e5_retrieval")
+    strategy_name = e5.get("strategy", "fixedSize")
+    top_k = int(e5.get("top_k", 10))
+    prefetch_limit = int(e5.get("prefetch_limit", 50))
+    rebuild = bool(e5.get("rebuild", True))
+
+    # E5 requires Qdrant - hybrid search (prefetch + RRF) runs in the DB
+    qdrant_url = os.getenv("QDRANT_API")
+    if not qdrant_url:
+        raise RuntimeError(
+            "E5 wymaga Qdrant (QDRANT_API w .env) - "
+            "hybrydowe wyszukiwanie działa w bazie"
+        )
+
+    # Depth of each hybrid leg before the RRF fusion (.env may override)
+    os.environ.setdefault("HYBRID_PREFETCH_LIMIT", str(prefetch_limit))
+
+    from buissnes_agent.QdrantDatabaseStore import QdrantDatabaseStore
+
+    try:
+        dim = int(os.getenv("EMBEDDING_DIM"))
+    except (TypeError, ValueError):
+        dim = 1536
+    store = QdrantDatabaseStore(
+        url=qdrant_url,
+        api_key=os.getenv("QDRANT_API_KEY"),
+        collection_name=collection,
+        vector_size=dim,
+    )
+    client = store.client
+
+    size, overlap = _base_params(cfg)
+
+    # 1) corpus - ingested ONCE; both arms query the same chunks
+    source = data_source()
+    loader = _make_loader(source, dataset_path)
+    total_docs = sum(1 for _ in loader.list_objects())
+
+    embedding_client = LocalEmbeddingClient()
+    if rebuild or store.count() == 0:
+        kb = SearchKnowledgebase(
+            client=embedding_client,
+            database_store=store,
+            data_loader=loader,
+            embedding_model=os.getenv("EMBEDDING_MODEL"),
+            batch_size=int(cfg.get("batch_size", 50)),
+            force_refresh=True,
+            strategy_name=strategy_name,
+            chunk_size=size,
+            chunk_overlap=overlap,
+            # E5 scores retrieval, not chunking quality - no doc hook
+            on_document=None,
+            persist_metrics=False,
+        )
+        print(f"[E5] Kolekcja '{collection}' zbudowana: "
+              f"{store.count()} chunków z {total_docs} dokumentów")
+    else:
+        print(f"[E5] Kolekcja '{collection}' istnieje "
+              f"({store.count()} chunków) - pomijam ingest")
+
+    # 2) BM25 sparse index (the keyword leg of the hybrid)
+    from buissnes_agent.Bm25Index import build_sparse_vectors, load_index
+
+    if rebuild or load_index(collection) is None:
+        build_sparse_vectors(client, collection)
+    else:
+        print(f"[E5] Indeks BM25 dla '{collection}' istnieje - pomijam")
+
+    # 3) queries + ground truth
+    queries = _load_e5_queries(cfg)
+
+    # The retrieved IDs live in the retrieval metrics row -
+    # the repository must be up (Postgres per .env)
+    from buissnes_agent.tools.rag_metrics import metrics_collector
+    if not metrics_collector.is_enabled():
+        raise RuntimeError(
+            "E5 wymaga repository metryk (METRICS_STORAGE_TYPE w .env) - "
+            "identyfikatory pobranych chunków są zapisywane tam"
+        )
+
+    # Chunk payloads by ID (ground-truth matching)
+    id_to_payload: Dict[str, Dict[str, Any]] = {}
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=collection,
+            limit=512,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in points:
+            id_to_payload[str(point.id)] = point.payload or {}
+        if offset is None:
+            break
+    if not id_to_payload:
+        raise RuntimeError(
+            f"E5: kolekcja '{collection}' nie ma żadnego punktu po ingest"
+        )
+
+    # 4) both arms on the same corpus
+    from buissnes_agent.tools.tool_iso_rag import run_generic_rag_with_metrics
+
+    per_query: List[Dict[str, Any]] = []
+    for q in queries:
+        expected = q.get("expected_sources", [])
+        relevant_ids = {
+            pid for pid, payload in id_to_payload.items()
+            if _e5_source_matches(payload, expected)
+        }
+        entry: Dict[str, Any] = {
+            "id": q["id"],
+            "query": q["query"],
+            "expected_sources": expected,
+            "n_relevant": len(relevant_ids),
+            "arms": {},
+        }
+        for arm in E5_STRATEGIES:
+            output, metrics = run_generic_rag_with_metrics(
+                query=q["query"],
+                collection_name=collection,
+                top_k=top_k,
+                strategy=arm,
+            )
+            if metrics is None:
+                raise RuntimeError(
+                    f"E5: brak metryk dla '{q['id']}' ({arm}) - "
+                    f"odpowiedź: {output}"
+                )
+            retrieved_ids = list(metrics.retrieved_ids or [])
+            hit_ranks = [
+                rank for rank, pid in enumerate(retrieved_ids, 1)
+                if pid in relevant_ids
+            ]
+            entry["arms"][arm] = {
+                "requested": arm,
+                # the strategy ACTUALLY used (hybrid can fall back to dense
+                # when the BM25 index is missing or the query has no
+                # tokens from the index vocabulary)
+                "strategy_used": metrics.strategy,
+                "n_retrieved": len(retrieved_ids),
+                "hit": bool(hit_ranks),
+                "recall": (
+                    len(set(retrieved_ids) & relevant_ids) / len(relevant_ids)
+                    if relevant_ids else None
+                ),
+                "mrr": (1.0 / hit_ranks[0]) if hit_ranks else 0.0,
+                "latency_ms": metrics.latency_ms,
+                "search_latency_ms": metrics.search_latency_ms,
+                "retrieved_ids": retrieved_ids,
+            }
+        per_query.append(entry)
+
+    # 5) per-arm summary (only the queries the arm ACTUALLY ran -
+    #    fallbacks are counted separately and excluded from the pairing)
+    per_arm: Dict[str, Any] = {}
+    for arm in E5_STRATEGIES:
+        rows = [
+            qe["arms"][arm] for qe in per_query
+            if qe["arms"][arm]["strategy_used"] == arm
+        ]
+        recalls = [r["recall"] for r in rows if r["recall"] is not None]
+        per_arm[arm] = {
+            "n_queries": len(per_query),
+            "n_ran": len(rows),
+            "n_fallback": len(per_query) - len(rows),
+            "hit_rate": (
+                sum(1 for r in rows if r["hit"]) / len(rows)
+            ) if rows else None,
+            "recall_mean": (sum(recalls) / len(recalls)) if recalls else None,
+            "mrr_mean": (
+                sum(r["mrr"] for r in rows) / len(rows)
+            ) if rows else None,
+            "search_latency_mean_ms": (
+                sum(r["search_latency_ms"] for r in rows) / len(rows)
+            ) if rows else None,
+        }
+
+    result = {
+        "experiment_id": f"E5_{collection}_{_stamp()}",
+        "collection": collection,
+        "chunking_strategy": strategy_name,
+        "chunk_size": size,
+        "chunk_overlap": overlap,
+        "top_k": top_k,
+        "prefetch_limit": prefetch_limit,
+        "embedding_model": os.getenv("EMBEDDING_MODEL"),
+        "documents_total": total_docs,
+        "chunks": len(id_to_payload),
+        "n_queries": len(per_query),
+        "timestamp": datetime.now().isoformat(),
+        "per_arm": per_arm,
+        "queries": per_query,
+    }
+
+    out_path = os.path.join(PROJECT_ROOT, "results", "e5_results.json")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    print(f"[E5] Wyniki: {out_path}")
+    return result
+
+
 RUNNERS = {
     "E1": run_e1,
     "E2": run_e2,
     "E3": run_e3,
     "E4": run_e4,
+    "E5": run_e5,
 }
 
 
@@ -421,11 +690,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Runner for experiments E1-E4 (chapter 4)"
+        description="Runner for experiments E1-E5 (chapter 4)"
     )
     parser.add_argument(
         "--exp", default="all",
-        choices=["E1", "E2", "E3", "E4", "all"],
+        choices=["E1", "E2", "E3", "E4", "E5", "all"],
         help="which experiment to run (default: all)"
     )
     parser.add_argument(

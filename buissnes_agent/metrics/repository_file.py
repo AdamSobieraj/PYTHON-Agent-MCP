@@ -87,7 +87,8 @@ class FileMetricsRepository(IMetricsRepository):
             self,
             limit: int = 100,
             collection_name: Optional[str] = None,
-            hours: Optional[int] = None
+            hours: Optional[int] = None,
+            strategy: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Implementation: read from the file with filtering"""
         metrics = []
@@ -100,6 +101,10 @@ class FileMetricsRepository(IMetricsRepository):
 
                         # Filter by collection_name
                         if collection_name and data.get("collection_name") != collection_name:
+                            continue
+
+                        # Filter by retrieval strategy (dense/hybrid, E5)
+                        if strategy and data.get("strategy") != strategy:
                             continue
 
                         # Filter by time

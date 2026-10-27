@@ -100,22 +100,153 @@ def _measure_embedding_time(embedder, query: str) -> Tuple[list, int]:
     return query_vector, latency_ms
 
 
-def _measure_search_time(client, collection_name: str, query_vector: list, top_k: int):
+# ==============================================================================
+# RETRIEVAL STRATEGY: dense (pure vector) vs hybrid (dense + sparse BM25, RRF)
+# ==============================================================================
+
+DEFAULT_RETRIEVAL_STRATEGY = "dense"
+DEFAULT_HYBRID_PREFETCH_LIMIT = 50
+
+# Collection -> dense vector name (None = old schema, single unnamed vector).
+# Resolved once per collection per process (schema does not change at runtime).
+_DENSE_VECTOR_NAMES: dict = {}
+_SPARSE_VECTOR_NAMES: dict = {}
+
+
+def resolve_strategy(strategy: str | None = None) -> str:
     """
-    Perform search with time measurement
+    Resolve the retrieval strategy: explicit argument takes precedence,
+    then RETRIEVAL_STRATEGY from .env, then the "dense" default
+    (so behaviour is unchanged until the flag is set).
+    """
+    if strategy:
+        resolved = strategy.strip().lower()
+        if resolved:
+            return resolved
+    env_value = (os.getenv("RETRIEVAL_STRATEGY") or "").strip().lower()
+    return env_value or DEFAULT_RETRIEVAL_STRATEGY
+
+
+def _resolve_prefetch_limit() -> int:
+    """HYBRID_PREFETCH_LIMIT from .env (how deep each leg fetches before RRF)."""
+    env_value = (os.getenv("HYBRID_PREFETCH_LIMIT") or "").strip()
+    if not env_value:
+        return DEFAULT_HYBRID_PREFETCH_LIMIT
+    try:
+        resolved = int(env_value)
+    except ValueError:
+        logger.warning(
+            "Invalid HYBRID_PREFETCH_LIMIT=%r. Falling back to %s.",
+            env_value,
+            DEFAULT_HYBRID_PREFETCH_LIMIT,
+        )
+        return DEFAULT_HYBRID_PREFETCH_LIMIT
+    return resolved if resolved > 0 else DEFAULT_HYBRID_PREFETCH_LIMIT
+
+
+def _collection_vector_names(client, collection_name: str) -> Tuple[Optional[str], bool]:
+    """
+    Returns (dense_vector_name, has_sparse) for the collection schema.
+
+    dense_vector_name: "dense" for the new schema (named vectors),
+    None for the old schema (a single unnamed vector).
+    has_sparse: whether the collection has the named "sparse" vector.
+    """
+    if collection_name not in _DENSE_VECTOR_NAMES:
+        try:
+            info = client.get_collection(collection_name)
+            vectors = info.config.params.vectors
+            dense_name = "dense" if isinstance(vectors, dict) and "dense" in vectors else None
+            sparse_config = info.config.params.sparse_vectors
+            has_sparse = bool(sparse_config) and "sparse" in sparse_config
+        except Exception as e:
+            logger.warning(
+                "Nie udało się odczytać schematu kolekcji %s: %s", collection_name, e
+            )
+            dense_name, has_sparse = None, False
+        _DENSE_VECTOR_NAMES[collection_name] = dense_name
+        _SPARSE_VECTOR_NAMES[collection_name] = has_sparse
+    return _DENSE_VECTOR_NAMES[collection_name], _SPARSE_VECTOR_NAMES[collection_name]
+
+
+def _measure_search_time(client, collection_name: str, query: str,
+                         query_vector: list, top_k: int,
+                         strategy: str = "dense"):
+    """
+    Perform search with time measurement.
+
+    strategy:
+        "dense"  -- pure vector search (query_points on the dense vector)
+        "hybrid" -- Qdrant native hybrid: two prefetches (dense + sparse
+                    BM25 from the app-side index) fused with RRF on the server.
+
+    Falls back to dense (and reports the strategy actually used) when the
+    BM25 index is missing, the collection has no sparse vector, or the
+    query contains no tokens from the index vocabulary.
 
     Returns:
-        tuple: (search_response, search_latency_ms)
+        tuple: (search_response, search_latency_ms, strategy_used)
     """
     start_time = time.time()
+    dense_name, has_sparse = _collection_vector_names(client, collection_name)
+
+    # ---- hybrid leg (only when requested AND everything is in place) ----
+    if strategy == "hybrid" and has_sparse:
+        try:
+            from buissnes_agent.Bm25Index import load_index
+        except ImportError:
+            from Bm25Index import load_index  # type: ignore
+
+        index = load_index(collection_name)
+        if index is None:
+            logger.warning(
+                "Hybryda: brak indeksu BM25 dla kolekcji '%s' -- "
+                "używam czystego wyszukiwania wektorowego.", collection_name
+            )
+        else:
+            sparse_indices, sparse_values = index.encode_query(query)
+            if not sparse_indices:
+                logger.warning(
+                    "Hybryda: zapytanie nie zawiera tokenów ze słownika BM25 -- "
+                    "używam czystego wyszukiwania wektorowego."
+                )
+            else:
+                from qdrant_client.models import Fusion, FusionQuery, Prefetch, SparseVector
+
+                prefetch_k = _resolve_prefetch_limit()
+                dense_prefetch = {"query": query_vector, "limit": prefetch_k}
+                if dense_name is not None:
+                    dense_prefetch["using"] = dense_name
+                search_response = client.query_points(
+                    collection_name=collection_name,
+                    prefetch=[
+                        Prefetch(**dense_prefetch),
+                        Prefetch(
+                            query=SparseVector(indices=sparse_indices, values=sparse_values),
+                            using="sparse",
+                            limit=prefetch_k,
+                        ),
+                    ],
+                    query=FusionQuery(fusion=Fusion.RRF),
+                    limit=top_k,
+                    with_payload=True,
+                )
+                latency_ms = MetricsCalculator.calculate_latency_ms(start_time)
+                return search_response, latency_ms, "hybrid"
+
+    # ---- dense (default + fallback) ----
+    query_kwargs = {}
+    if dense_name is not None:
+        query_kwargs["using"] = dense_name
     search_response = client.query_points(
         collection_name=collection_name,
         query=query_vector,
         limit=top_k,
-        with_payload=True
+        with_payload=True,
+        **query_kwargs
     )
     latency_ms = MetricsCalculator.calculate_latency_ms(start_time)
-    return search_response, latency_ms
+    return search_response, latency_ms, "dense"
 
 
 def resolve_top_k(top_k: int | None = None) -> int:
@@ -210,6 +341,7 @@ def run_generic_rag_with_metrics(
         query: str,
         collection_name: str,
         top_k: int | None = None,
+        strategy: str | None = None,
 ) -> Tuple[str, Optional[RetrievalMetrics]]:
     """
     RAG with full retrieval metrics (if enabled in ENV)
@@ -217,6 +349,9 @@ def run_generic_rag_with_metrics(
     Args:
         query: User question
         collection_name: Collection name in Qdrant
+        top_k: optional retrieval limit (see resolve_top_k)
+        strategy: "dense" or "hybrid"; when omitted, RETRIEVAL_STRATEGY
+                  from .env is used (default "dense")
 
     Returns:
         tuple: (formatted_output, retrieval_metrics)
@@ -226,6 +361,7 @@ def run_generic_rag_with_metrics(
     total_start = time.time()
 
     top_k = resolve_top_k(top_k)
+    strategy = resolve_strategy(strategy)
 
     # ===== INITIALIZATION ERROR HANDLING =====
     try:
@@ -240,7 +376,8 @@ def run_generic_rag_with_metrics(
             error_metrics = MetricsCalculator.create_error_metrics(
                 query=query,
                 collection_name=collection_name,
-                latency_ms=total_latency
+                latency_ms=total_latency,
+                strategy=strategy
             )
             metrics_collector.log_retrieval(error_metrics)
 
@@ -258,13 +395,15 @@ def run_generic_rag_with_metrics(
             error_metrics = MetricsCalculator.create_error_metrics(
                 query=query,
                 collection_name=collection_name,
-                latency_ms=total_latency
+                latency_ms=total_latency,
+                strategy=strategy
             )
             metrics_collector.log_retrieval(error_metrics)
 
         return error_msg, error_metrics
 
-    print(f"[RAG] Szukam: '{query}' w kolekcji '{collection_name}'", file=sys.stderr)
+    print(f"[RAG] Szukam: '{query}' w kolekcji '{collection_name}' "
+          f"(strategia: {strategy})", file=sys.stderr)
 
     # ===== MAIN RETRIEVAL LOGIC =====
     try:
@@ -272,8 +411,11 @@ def run_generic_rag_with_metrics(
         query_vector, embedding_latency = _measure_embedding_time(embedder, query)
 
         # STEP 2: Search in Qdrant (with time measurement)
-        search_response, search_latency = _measure_search_time(
-            client, collection_name, query_vector, top_k
+        # The strategy actually used may differ from the requested one
+        # (hybrid falls back to dense when the BM25 index is missing) --
+        # the metrics must record the strategy that ran, not the request.
+        search_response, search_latency, strategy_used = _measure_search_time(
+            client, collection_name, query, query_vector, top_k, strategy
         )
 
         points = search_response.points
@@ -291,7 +433,8 @@ def run_generic_rag_with_metrics(
                     points=None,
                     total_latency_ms=total_latency,
                     embedding_latency_ms=embedding_latency,
-                    search_latency_ms=search_latency
+                    search_latency_ms=search_latency,
+                    strategy=strategy_used
                 )
                 metrics_collector.log_retrieval(empty_metrics)
 
@@ -311,7 +454,8 @@ def run_generic_rag_with_metrics(
                 points=points,
                 total_latency_ms=total_latency,
                 embedding_latency_ms=embedding_latency,
-                search_latency_ms=search_latency
+                search_latency_ms=search_latency,
+                strategy=strategy_used
             )
             metrics_collector.log_retrieval(metrics)
 
@@ -328,7 +472,8 @@ def run_generic_rag_with_metrics(
             error_metrics = MetricsCalculator.create_error_metrics(
                 query=query,
                 collection_name=collection_name,
-                latency_ms=total_latency
+                latency_ms=total_latency,
+                strategy=strategy
             )
             metrics_collector.log_retrieval(error_metrics)
 
@@ -343,6 +488,7 @@ def run_generic_rag(
     query: str,
     collection_name: str,
     top_k: int | None = None,
+    strategy: str | None = None,
 ) -> str:
     """
     Original function without metrics (for backward compatibility)
@@ -354,5 +500,6 @@ def run_generic_rag(
         query,
         collection_name,
         top_k=top_k,
+        strategy=strategy,
     )
     return result
